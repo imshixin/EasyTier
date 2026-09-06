@@ -1,4 +1,4 @@
-use std::{fmt::Debug, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{fmt::Debug, future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -10,8 +10,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
-    events::{CoreEvent, CoreEventSink},
-    socket::{SocketContext, SocketListener},
+    connectivity::hole_punch::port_mapping::{UdpPortMappingPlatform, start_direct_udp_port_mapping, ManagedDirectUdpPortMappingLease}, events::{CoreEvent, CoreEventSink}, socket::{SocketContext, SocketListener},
 };
 
 pub mod plan;
@@ -147,6 +146,177 @@ impl Default for ListenerManagerOptions {
         }
     }
 }
+
+pub struct DirectMappingListennerManager<Accepted, H: ?Sized> {
+    handler: Arc<H>,
+    platform: Option<Arc<dyn UdpPortMappingPlatform + 'static>>,
+    registry: Arc<RunningListenerRegistry>,
+    events: Arc<dyn CoreEventSink>,
+    options: ListenerManagerOptions,
+    cancel: CancellationToken,
+    tasks: Mutex<JoinSet<()>>,
+    handler_tasks: Arc<Mutex<JoinSet<()>>>,
+    accepted_tasks: AcceptedTaskSpawner,
+    accepted_task_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<AcceptedTask>>>,
+    operation: Mutex<()>,
+    current_url: Mutex<Option<Url>>,
+    current_lease: Mutex<Option<ManagedDirectUdpPortMappingLease>>,
+    creator: Arc<dyn Fn(SocketAddr, Url) -> ListenerCreatorArc<Accepted> + Send + Sync + 'static>
+}
+impl<Accepted , H> DirectMappingListennerManager<Accepted , H>
+where
+    Accepted: Send + 'static,
+    H: AcceptedSocketHandler<Accepted> + ?Sized + 'static,
+{
+    pub(crate) fn new_with_platform(
+        handler: Arc<H>,
+        events: Arc<dyn CoreEventSink>,
+        registry: Arc<RunningListenerRegistry>,
+        platform: Option<Arc<dyn UdpPortMappingPlatform + 'static>>,
+        creator:  Arc<dyn Fn(SocketAddr, Url) -> ListenerCreatorArc<Accepted> + Send + Sync + 'static>
+    ) -> Self {
+        let (accepted_tasks, accepted_task_rx) = AcceptedTaskSpawner::new();
+        let mut options = ListenerManagerOptions::default();
+        options.max_listen_retries = 0;
+        Self {
+            handler,
+            platform,
+            registry,
+            events,
+            options,
+            operation: Mutex::new(()),
+            cancel: CancellationToken::new(),
+            tasks: Mutex::new(JoinSet::new()),
+            handler_tasks: Arc::new(Mutex::new(JoinSet::new())),
+            accepted_tasks,
+            accepted_task_rx: std::sync::Mutex::new(Some(accepted_task_rx)),
+            current_url: Mutex::new(None),
+            current_lease: Mutex::new(None),
+            creator
+        }
+    }
+
+    async fn update_listener(&self) -> anyhow::Result<()>{
+        if let Some(platform) = &self.platform {
+            let local_listener: Url = "udp://0.0.0.0:12121".parse().unwrap();
+            let lease =  start_direct_udp_port_mapping(
+                platform.clone(), self.events.clone(), &local_listener
+            ).await?.context("mapped with none lease")?;
+            let wan_addr = lease.get_wan_addr();
+            let local_addr = lease.get_local_addr();
+            let url = Url::parse(&format!("udp://{}:{}", wan_addr.ip(), local_addr.port()))?;
+            tracing::info!(%url, %wan_addr, "mytracing-update_listener");
+            let mut old_url = self.current_url.lock().await;
+            let old = old_url.replace(url.clone());
+            if let Some(old_url) = old {
+                self.registry.unregister(&old_url);
+            }
+            self.registry.register(url);
+            let mut old_lease = self.current_lease.lock().await;
+            let old_lease = old_lease.replace(lease);
+            let old_wan = old_lease.map(|lease| lease.get_wan_addr());
+            match old_wan {
+                Some(wan) =>{
+                    tracing::info!(%wan, %wan_addr, "direct udp port mapping replaced");
+                },
+                None =>{
+                    tracing::info!( %wan_addr, "direct udp port mapping added");
+
+                }
+            };
+            Ok(())
+        }else{
+            anyhow::bail!("no udp port mapping platform");
+        }
+    }
+
+    async fn run(&self) -> anyhow::Result<()>{
+        let _operation = self.operation.lock().await;
+        if self.cancel.is_cancelled() {
+            anyhow::bail!("listener manager is stopped");
+        }
+        let accepted_task_rx = self
+            .accepted_task_rx
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("listener manager is one-shot and already ran"))?;
+        if self.cancel.is_cancelled() {
+            anyhow::bail!("listener manager stopped during startup");
+        }
+
+
+
+        let mut tasks = self.tasks.lock().await;
+        tasks.spawn(run_accepted_task_runner(
+            accepted_task_rx,
+            self.handler_tasks.clone(),
+            self.cancel.clone(),
+        ));
+        let platform = self.platform.clone();
+        tracing::info!("mytracing-start direct mapping");
+        if let Some(platform) = platform {
+            let local_listener: Url = "udp://0.0.0.0:0".parse().unwrap();
+            let local_addr = "0.0.0.0:0".parse().unwrap();
+            let creator = (self.creator)(local_addr, local_listener.clone());
+            // let init_listener = listen_once();
+            let initial_listener = tokio::select! {
+                    _ = self.cancel.cancelled() => {
+                        anyhow::bail!("listener manager stopped during startup")
+                    }
+                    result = listen_once(creator.clone()) => {
+                        result.with_context(|| "required listener failed to start")?
+                    }
+            };
+            let real_url = initial_listener.local_url();
+            tracing::info!(%real_url, "mytracing-real listener url");
+            // return Err(anyhow::anyhow!(""));
+            let lease =  start_direct_udp_port_mapping(
+                platform.clone(), self.events.clone(), &real_url
+            ).await?.context("mapped with none lease")?;
+            let wan_addr = lease.get_wan_addr();
+            let wan_url = Url::parse(&format!("udp://{}:{}", wan_addr.ip(), wan_addr.port())).with_context(
+                || {
+                    anyhow::anyhow!("parse wan url")
+                }
+            )?;
+            tracing::info!(%wan_url, %local_addr, "mytracing-established new udp port mapping");
+            let mut cur_lease = self.current_lease.lock().await;
+            let _old_lease = cur_lease.replace(lease);
+            let reg = RegisteredListener::new_with_url(
+                initial_listener,
+                self.events.clone(),
+                self.registry.clone(),
+                wan_url.clone(),
+            );
+            let cancel = self.cancel.clone();
+            let listener = run_listener(
+                creator,
+                self.handler.clone(),
+                self.events.clone(),
+                self.registry.clone(),
+                self.options.clone(),
+                self.accepted_tasks.clone(),
+                Some(reg),
+            );
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _ = listener => {}
+                };
+            });
+            // loop {
+            // }
+        }else {
+            tracing::info!("mytracing-none platform");
+        }
+        // tasks.spawn(async move {
+        // });
+
+        Ok(())
+    }
+}
+
 
 pub struct ListenerManager<Accepted, H: ?Sized> {
     factories: Vec<ListenerFactory<Accepted>>,
@@ -354,6 +524,8 @@ async fn run_listener<Accepted, H>(
             Some(listener) => listener,
             None => {
                 let mut listener = creator();
+                let url = listener.local_url();
+                tracing::info!(%url, "mytracing-before listen");
                 match listener.listen().await {
                     Ok(()) => {
                         listen_error_count = 0;
@@ -470,6 +642,29 @@ where
     ) -> Self {
         let url = listener.local_url();
         let registry = registry.register(url.clone());
+        tracing::info!(%url, "mytracing-after listen");
+        events.emit(CoreEvent::ListenerAdded {
+            url: url.clone(),
+            connection_counter: listener.connection_counter(),
+        });
+        Self {
+            listener,
+            registration: ListenerRegistration {
+                url,
+                events,
+                registry: Some(registry),
+            },
+        }
+    }
+    fn new_with_url(
+        listener: Box<dyn SocketListener<Accepted = Accepted>>,
+        events: Arc<dyn CoreEventSink>,
+        registry: Arc<RunningListenerRegistry>,
+        url: Url
+    ) -> Self {
+        // let url = listener.local_url();
+        let registry = registry.register(url.clone());
+        tracing::info!(%url, "mytracing-after listen");
         events.emit(CoreEvent::ListenerAdded {
             url: url.clone(),
             connection_counter: listener.connection_counter(),

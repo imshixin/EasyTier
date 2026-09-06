@@ -640,6 +640,7 @@ where
                 accepted_transport_handler,
                 events.clone(),
                 running_listeners.clone(),
+                udp_hole_punch_platform.clone(),
             ))
         });
         let protocol = protocol.unwrap_or_else(|| {
@@ -671,7 +672,7 @@ where
             peer_manager.clone(),
             host.clone(),
             stun.clone(),
-            udp_hole_punch_platform,
+            udp_hole_punch_platform.clone(),
             events.clone(),
             udp_hole_punch_socket_context,
             protocol.clone(),

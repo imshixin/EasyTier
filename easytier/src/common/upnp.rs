@@ -1,7 +1,5 @@
 use std::{
-    fmt,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    time::Duration,
+    fmt, net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4}, time::Duration,
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -224,6 +222,64 @@ pub(crate) async fn establish_udp_port_mapping(
     Ok(Box::new(mapping))
 }
 
+pub(crate) async fn get_router_wan_ip(
+    net_ns: NetNS,
+    backend: UdpPortMappingBackend,
+) -> anyhow::Result<IpAddr> {
+    let local_listener  = "udp://0.0.0.0:11010".parse::<url::Url>().unwrap();
+    match backend {
+        UdpPortMappingBackend::Igd =>{
+            let (gateway, _) =
+                discover_igd_gateway_in_netns(net_ns.clone(), local_listener.clone())
+                    .await
+                    .map_err(UdpPortMappingAttemptError::discovery)?;
+            gateway.get_external_ip()
+            .await
+            .with_context(|| {
+                        format!(
+                            "get_router_wan_ip by igd method failed"
+                        )
+                    })
+        },
+        UdpPortMappingBackend::NatPmp =>{
+            let (gateway, _) =
+                discover_nat_pmp_gateway_in_netns(net_ns.clone(), local_listener.clone())
+                    .await
+                    .map_err(UdpPortMappingAttemptError::discovery)?;
+            let mut client = new_tokio_natpmp_with(gateway)
+                .await
+                .with_context(|| format!("create nat-pmp client for gateway {gateway}"))?;
+            client
+                .send_public_address_request()
+                .await
+                .with_context(|| {
+                    format!(
+                        "send nat-pmp get public_address failed, gateway={gateway}"
+                    )
+                })?;
+
+            let response = tokio::time::timeout(NAT_PMP_RESPONSE_TIMEOUT, client.read_response_or_retry())
+                .await
+                .with_context(|| {
+                    format!(
+                        "wait nat-pmp udp mapping response gateway={gateway}"
+                    )
+                })?
+                .map_err(anyhow::Error::from)
+                .with_context(|| {
+                    format!(
+                        "read nat-pmp udp mapping response gateway={gateway}"
+                    )
+                })?;
+
+            match response {
+                NatPmpResponse::Gateway(r) => Ok(IpAddr::V4(r.public_address().clone())),
+                _ => bail!("Natpmp response invalid: {response:?}")
+            }
+        }
+    }
+}
+
 pub(crate) fn spawn_udp_port_mapping_lifecycle(
     net_ns: NetNS,
     local_listener: url::Url,
@@ -283,7 +339,7 @@ async fn establish_igd_mapping_in_netns(
     }
 
     tokio::task::spawn_blocking(move || {
-        let _g = net_ns.guard();
+        let _g: Box<super::netns::NetNSGuard> = net_ns.guard();
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -528,7 +584,6 @@ async fn resolve_internal_addr(
     } else {
         host
     };
-
     Ok(SocketAddr::new(ip.into(), port))
 }
 

@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData, sync::Arc};
+use std::{fmt, marker::PhantomData, net::{SocketAddr}, sync::Arc};
 
 use async_trait::async_trait;
 use rand::seq::SliceRandom as _;
@@ -7,26 +7,16 @@ use url::Url;
 
 use crate::{
     connectivity::{
-        manual::resolve_url_addrs,
-        protocol::{
+        hole_punch::port_mapping::{UdpPortMappingPlatform}, manual::resolve_url_addrs, protocol::{
             ServerProtocolAdmissionController, ServerProtocolUpgrade, ServerProtocolUpgrader, raw,
         },
-    },
-    events::{CoreEvent, CoreEventSink},
-    host::dns::DnsResolver,
-    listener::{
-        AcceptedSocketHandler, ListenerFactory, ListenerManager, RunningListenerRegistry,
-        plan::ListenerPlanFailure,
-    },
-    socket::{
-        IpVersion, ListenerConnectionCounter, SocketContext, SocketListener,
-        tcp::{TcpListenOptions, TcpSocketListener, VirtualTcpListener, VirtualTcpListenerFactory},
-        udp::{
-            UdpSession, UdpSessionAcceptKind, UdpSessionListenRequest, UdpSessionSocket,
-            UdpSessionSocketListener, VirtualUdpSocketFactory,
+    }, events::{CoreEvent, CoreEventSink}, host::dns::DnsResolver, listener::{
+        AcceptedSocketHandler, DirectMappingListennerManager, ListenerFactory, ListenerManager, RunningListenerRegistry, plan::ListenerPlanFailure,
+    }, socket::{
+        IpVersion, ListenerConnectionCounter, SocketContext, SocketListener, tcp::{TcpListenOptions, TcpSocketListener, VirtualTcpListener, VirtualTcpListenerFactory}, udp::{
+            UdpBindOptions, UdpSession, UdpSessionAcceptKind, UdpSessionListenRequest, UdpSessionSocket, UdpSessionSocketListener, VirtualUdpSocketFactory,
         },
-    },
-    tunnel::{Tunnel, ring::RingTunnelRegistry},
+    }, tunnel::{Tunnel, ring::RingTunnelRegistry},
 };
 
 pub type HostAcceptedTcpSocket<H> =
@@ -574,7 +564,42 @@ type HostTransportListenerManager<H> = ListenerManager<
     AcceptedTransport<HostAcceptedTcpSocket<H>>,
     dyn AcceptedSocketHandler<AcceptedTransport<HostAcceptedTcpSocket<H>>>,
 >;
+type HostTransportDirectListenerManager<H> = DirectMappingListennerManager<
+    AcceptedTransport<HostAcceptedTcpSocket<H>>,
+    dyn AcceptedSocketHandler<AcceptedTransport<HostAcceptedTcpSocket<H>>>,
+>;
 
+// pub struct DirectMappingListenerFactory {
+//     wan_ip: Option<IpAddr>,
+//     wan_port: u16,
+//     local_port: u16,
+// }
+// impl DirectMappingListenerFactory {
+//     async fn get_router_wan_ip(&mut self, platform: &Option<Arc<dyn UdpPortMappingPlatform + 'static>>) {
+//         if let Some(platform) = platform {
+//             let ip = platform.get_router_wanip(UdpPortMappingBackend::Igd)
+//             .await
+//             .or(platform.get_router_wanip(UdpPortMappingBackend::NatPmp).await)
+//             .ok();
+//             self.wan_ip = ip;
+//         }
+//     }
+//     pub async fn establish_udp_port_mapping(&mut self, platform: &Option<Arc<dyn UdpPortMappingPlatform + 'static>>)  {
+//         if let Some(platform) = platform {
+//             let local_listener: Url = "udp://0.0.0.0:0".parse().unwrap();
+//             match platform.establish_udp_port_mapping(UdpPortMappingBackend::Igd, &local_listener).await{
+//                 Ok(port_mapping) =>{
+//                     self.wan_port = port_mapping.gateway_external_port();
+//                     self.local_port = port_mapping.local_addr().port();
+//                 },
+//                 Err(e) =>{
+//                     tracing::info!(?e,"使用igd建立端口映射失败，尝试Natpmp");
+//                     platform.establish_udp_port_mapping(UdpPortMappingBackend::NatPmp, &local_listener).await;
+//                 }
+//             }
+//         }
+//     }
+// }
 /// Owns all listeners planned by core, including host-backed external sockets.
 pub(crate) struct CoreListenerRuntime<H>
 where
@@ -583,6 +608,7 @@ where
     manager: HostTransportListenerManager<H>,
     plan_failures: Vec<ListenerPlanFailure>,
     events: Arc<dyn CoreEventSink>,
+    direct_manager: HostTransportDirectListenerManager<H>
 }
 
 impl<H> CoreListenerRuntime<H>
@@ -600,12 +626,43 @@ where
         handler: Arc<dyn AcceptedSocketHandler<AcceptedTransport<HostAcceptedTcpSocket<H>>>>,
         events: Arc<dyn CoreEventSink>,
         registry: Arc<RunningListenerRegistry>,
+        platform: Option<Arc<dyn UdpPortMappingPlatform + 'static>>
     ) -> Self {
         let mut manager = ListenerManager::new_with_registry(
-            handler,
+            handler.clone(),
             events.clone(),
-            registry,
+            registry.clone(),
             crate::listener::ListenerManagerOptions::default(),
+        );
+
+        let host1 = host.clone();
+        let dns1 = dns.clone();
+        let direct_manager = DirectMappingListennerManager::new_with_platform(
+            handler.clone(),
+            events.clone(),
+            registry.clone(),
+            platform.clone(),
+            Arc::new(move |local_addr: SocketAddr, wan_url: Url| {
+                tracing::info!(%local_addr, %wan_url, "mytracing-creating listener");
+                let mut bind_options = UdpBindOptions::direct_connect();
+                bind_options.local_addr = Some(local_addr);
+                let options = UdpSessionListenRequest {
+                    bind: bind_options
+                };
+                let kind = UdpSessionAcceptKind::EasyTierMux;
+                let host = host1.clone();
+                let dns = dns1.clone();
+
+                Arc::new(move || {
+                    Box::new(UdpTransportListener::new(
+                        wan_url.clone(),
+                        options.clone(),
+                        kind,
+                        host.clone(),
+                        dns.clone()
+                    ))
+                })
+            })
         );
 
         for config in configs {
@@ -671,11 +728,31 @@ where
         for factory in external_factories {
             manager.add_factory(factory);
         }
+        // if let Some(platform) = platform {
+        //     // 动态映射
+        //     let ip = platform.get_router_wanip(UdpPortMappingBackend::Igd)
+        //     .await
+        //     .map_err(|| {
+        //         platform.get_router_wanip(UdpPortMappingBackend::NatPmp)
+        //     });
+        //     let url = format!("udp://{}:0", ip).parse::<url::Url>().unwrap_or("udp://0.0.0.0:0".parse::<Url>().unwrap());
+        //     let options = TcpListenOptions::direct_connect(std::net::SocketAddr::V4("".parse::<SocketAddrV4>().unwrap()));
+        //     manager.add_listener( move || {
+        //         Box::new(TcpTransportListener::new(
+        //             url,
+        //             options,
+        //             None,
+        //             host.clone(),
+        //             dns.clone()
+        //         ))
+        //     }, false);
+        // }
 
         Self {
             manager,
             plan_failures,
             events,
+            direct_manager
         }
     }
 
@@ -686,7 +763,9 @@ where
                 error: failure.message.clone(),
             });
         }
-        self.manager.run().await
+        self.direct_manager.run().await?;
+        let ret = self.manager.run().await;
+        ret
     }
 
     pub async fn stop(&self) {
@@ -1513,6 +1592,7 @@ mod tests {
             handler,
             Arc::new(RecordingListenerEvents::default()),
             Arc::new(RunningListenerRegistry::default()),
+            None,
         );
 
         service.start().await.unwrap();
@@ -1567,6 +1647,7 @@ mod tests {
             Arc::new(|_: AcceptedTransport<MockTcpSocket>| async { Ok(()) }),
             events.clone(),
             Arc::new(RunningListenerRegistry::default()),
+            None
         );
 
         service.start().await.unwrap();
