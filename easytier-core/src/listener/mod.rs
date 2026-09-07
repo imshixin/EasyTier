@@ -198,32 +198,55 @@ where
 
     async fn update_listener(&self) -> anyhow::Result<()>{
         if let Some(platform) = &self.platform {
-            let local_listener: Url = "udp://0.0.0.0:12121".parse().unwrap();
+            let local_listener: Url = "udp://0.0.0.0:0".parse().unwrap();
+            let local_addr = "0.0.0.0:0".parse().unwrap();
+            let creator = (self.creator)(local_addr, local_listener.clone());
+            let initial_listener = tokio::select! {
+                    _ = self.cancel.cancelled() => {
+                        anyhow::bail!("listener manager stopped during startup")
+                    }
+                    result = listen_once(creator.clone()) => {
+                        result.with_context(|| "required listener failed to start")?
+                    }
+            };
+            let real_url = initial_listener.local_url();
+            tracing::info!(%real_url, "mytracing-real listener url");
+            // return Err(anyhow::anyhow!(""));
             let lease =  start_direct_udp_port_mapping(
-                platform.clone(), self.events.clone(), &local_listener
+                platform.clone(), self.events.clone(), &real_url
             ).await?.context("mapped with none lease")?;
             let wan_addr = lease.get_wan_addr();
-            let local_addr = lease.get_local_addr();
-            let url = Url::parse(&format!("udp://{}:{}", wan_addr.ip(), local_addr.port()))?;
-            tracing::info!(%url, %wan_addr, "mytracing-update_listener");
-            let mut old_url = self.current_url.lock().await;
-            let old = old_url.replace(url.clone());
-            if let Some(old_url) = old {
-                self.registry.unregister(&old_url);
-            }
-            self.registry.register(url);
-            let mut old_lease = self.current_lease.lock().await;
-            let old_lease = old_lease.replace(lease);
-            let old_wan = old_lease.map(|lease| lease.get_wan_addr());
-            match old_wan {
-                Some(wan) =>{
-                    tracing::info!(%wan, %wan_addr, "direct udp port mapping replaced");
-                },
-                None =>{
-                    tracing::info!( %wan_addr, "direct udp port mapping added");
-
+            let wan_url = Url::parse(&format!("udp://{}:{}", wan_addr.ip(), wan_addr.port())).with_context(
+                || {
+                    anyhow::anyhow!("parse wan url")
                 }
-            };
+            )?;
+            tracing::info!(%wan_url, %local_addr, "mytracing-established new udp port mapping");
+
+            let mut cur_lease = self.current_lease.lock().await;
+            let _old_lease = cur_lease.replace(lease);
+            let reg = RegisteredListener::new_with_url(
+                initial_listener,
+                self.events.clone(),
+                self.registry.clone(),
+                wan_url.clone(),
+            );
+            let cancel = self.cancel.clone();
+            let listener = run_listener(
+                creator,
+                self.handler.clone(),
+                self.events.clone(),
+                self.registry.clone(),
+                self.options.clone(),
+                self.accepted_tasks.clone(),
+                Some(reg),
+            );
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _ = listener => {}
+                };
+            });
             Ok(())
         }else{
             anyhow::bail!("no udp port mapping platform");
