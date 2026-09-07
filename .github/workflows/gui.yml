@@ -139,14 +139,14 @@ jobs:
           fi
 
       - name: Build GUI
-        if: ${{ matrix.GUI_TARGET != '' && (!contains(matrix.GUI_TARGET, 'darwin') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) }}
+        if: ${{ matrix.GUI_TARGET != '' && (!contains(matrix.GUI_TARGET, 'darwin') || github.event_name == 'pull_request') }}
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: ./easytier-gui
           args: --verbose --target ${{ matrix.GUI_TARGET }}
 
       - name: Build GUI (signed and notarized)
-        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && github.event_name != 'pull_request' }}
         timeout-minutes: 60
         uses: tauri-apps/tauri-action@v0
         env:
@@ -161,7 +161,7 @@ jobs:
           args: --verbose --target ${{ matrix.GUI_TARGET }}
 
       - name: Notarize and staple macOS DMG
-        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && github.event_name != 'pull_request' }}
         timeout-minutes: 45
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
