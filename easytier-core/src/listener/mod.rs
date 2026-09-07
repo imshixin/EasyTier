@@ -259,7 +259,6 @@ where
             let local_listener: Url = "udp://0.0.0.0:0".parse().unwrap();
             let local_addr = "0.0.0.0:0".parse().unwrap();
             let creator = (self.creator)(local_addr, local_listener.clone());
-            // let init_listener = listen_once();
             let initial_listener = tokio::select! {
                     _ = self.cancel.cancelled() => {
                         anyhow::bail!("listener manager stopped during startup")
@@ -305,13 +304,9 @@ where
                     _ = listener => {}
                 };
             });
-            // loop {
-            // }
         }else {
-            tracing::info!("mytracing-none platform");
+            tracing::info!("mytracing-no platform");
         }
-        // tasks.spawn(async move {
-        // });
 
         Ok(())
     }
@@ -664,7 +659,6 @@ where
     ) -> Self {
         // let url = listener.local_url();
         let registry = registry.register(url.clone());
-        tracing::info!(%url, "mytracing-after listen");
         events.emit(CoreEvent::ListenerAdded {
             url: url.clone(),
             connection_counter: listener.connection_counter(),

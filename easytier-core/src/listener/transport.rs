@@ -569,37 +569,6 @@ type HostTransportDirectListenerManager<H> = DirectMappingListennerManager<
     dyn AcceptedSocketHandler<AcceptedTransport<HostAcceptedTcpSocket<H>>>,
 >;
 
-// pub struct DirectMappingListenerFactory {
-//     wan_ip: Option<IpAddr>,
-//     wan_port: u16,
-//     local_port: u16,
-// }
-// impl DirectMappingListenerFactory {
-//     async fn get_router_wan_ip(&mut self, platform: &Option<Arc<dyn UdpPortMappingPlatform + 'static>>) {
-//         if let Some(platform) = platform {
-//             let ip = platform.get_router_wanip(UdpPortMappingBackend::Igd)
-//             .await
-//             .or(platform.get_router_wanip(UdpPortMappingBackend::NatPmp).await)
-//             .ok();
-//             self.wan_ip = ip;
-//         }
-//     }
-//     pub async fn establish_udp_port_mapping(&mut self, platform: &Option<Arc<dyn UdpPortMappingPlatform + 'static>>)  {
-//         if let Some(platform) = platform {
-//             let local_listener: Url = "udp://0.0.0.0:0".parse().unwrap();
-//             match platform.establish_udp_port_mapping(UdpPortMappingBackend::Igd, &local_listener).await{
-//                 Ok(port_mapping) =>{
-//                     self.wan_port = port_mapping.gateway_external_port();
-//                     self.local_port = port_mapping.local_addr().port();
-//                 },
-//                 Err(e) =>{
-//                     tracing::info!(?e,"使用igd建立端口映射失败，尝试Natpmp");
-//                     platform.establish_udp_port_mapping(UdpPortMappingBackend::NatPmp, &local_listener).await;
-//                 }
-//             }
-//         }
-//     }
-// }
 /// Owns all listeners planned by core, including host-backed external sockets.
 pub(crate) struct CoreListenerRuntime<H>
 where
@@ -728,25 +697,6 @@ where
         for factory in external_factories {
             manager.add_factory(factory);
         }
-        // if let Some(platform) = platform {
-        //     // 动态映射
-        //     let ip = platform.get_router_wanip(UdpPortMappingBackend::Igd)
-        //     .await
-        //     .map_err(|| {
-        //         platform.get_router_wanip(UdpPortMappingBackend::NatPmp)
-        //     });
-        //     let url = format!("udp://{}:0", ip).parse::<url::Url>().unwrap_or("udp://0.0.0.0:0".parse::<Url>().unwrap());
-        //     let options = TcpListenOptions::direct_connect(std::net::SocketAddr::V4("".parse::<SocketAddrV4>().unwrap()));
-        //     manager.add_listener( move || {
-        //         Box::new(TcpTransportListener::new(
-        //             url,
-        //             options,
-        //             None,
-        //             host.clone(),
-        //             dns.clone()
-        //         ))
-        //     }, false);
-        // }
 
         Self {
             manager,
