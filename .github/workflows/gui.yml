@@ -21,7 +21,7 @@ defaults:
 
 jobs:
   pre_job:
-    # continue-on-error: true # Uncomment once integration is finished
+    continue-on-error: true # Uncomment once integration is finished
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # Map a step output to a job output
@@ -80,7 +80,7 @@ jobs:
       GUI_TARGET: ${{ matrix.GUI_TARGET }}
       OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
     needs: pre_job
-    if: needs.pre_job.outputs.should_skip != 'true'    
+    if: needs.pre_job.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v5
 
@@ -206,7 +206,7 @@ jobs:
       - name: Collect artifact
         run: |
           mkdir -p ./artifacts/objects/
-          
+
           if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
             TAG=$GITHUB_REF_NAME
           else
