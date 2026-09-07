@@ -118,7 +118,7 @@ jobs:
           fi
 
       - name: Validate macOS signing secrets
-        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && (github.event_name != 'pull_request' }}
+        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && github.event_name != 'pull_request' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
