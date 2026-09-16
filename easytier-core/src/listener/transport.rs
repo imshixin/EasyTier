@@ -720,6 +720,7 @@ where
 
     pub async fn stop(&self) {
         self.manager.stop().await;
+        self.direct_manager.stop().await;
     }
 }
 

@@ -80,7 +80,7 @@ jobs:
       GUI_TARGET: ${{ matrix.GUI_TARGET }}
       OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
     needs: pre_job
-    if: needs.pre_job.outputs.should_skip != 'true'    
+    if: needs.pre_job.outputs.should_skip != 'true'
     steps:
       - uses: actions/checkout@v5
 
@@ -118,7 +118,7 @@ jobs:
           fi
 
       - name: Validate macOS signing secrets
-        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && github.event_name != 'pull_request' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -139,14 +139,14 @@ jobs:
           fi
 
       - name: Build GUI
-        if: ${{ matrix.GUI_TARGET != '' && (!contains(matrix.GUI_TARGET, 'darwin') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) }}
+        if: ${{ matrix.GUI_TARGET != '' && (!contains(matrix.GUI_TARGET, 'darwin') || github.event_name == 'pull_request') }}
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: ./easytier-gui
           args: --verbose --target ${{ matrix.GUI_TARGET }}
 
       - name: Build GUI (signed and notarized)
-        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && github.event_name != 'pull_request' }}
         timeout-minutes: 60
         uses: tauri-apps/tauri-action@v0
         env:
@@ -161,7 +161,7 @@ jobs:
           args: --verbose --target ${{ matrix.GUI_TARGET }}
 
       - name: Notarize and staple macOS DMG
-        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ contains(matrix.GUI_TARGET, 'darwin') && github.event_name != 'pull_request' }}
         timeout-minutes: 45
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -206,7 +206,7 @@ jobs:
       - name: Collect artifact
         run: |
           mkdir -p ./artifacts/objects/
-          
+
           if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
             TAG=$GITHUB_REF_NAME
           else

@@ -466,7 +466,7 @@ mod tests {
         },
     };
 
-    use crate::{connectivity::{hole_punch::port_mapping::UdpPortMappingBackend, stun::StunInfoProvider}, proto::common::StunInfo};
+    use crate::{connectivity::{stun::StunInfoProvider}, proto::common::StunInfo};
 
     use super::*;
 
@@ -638,9 +638,8 @@ mod tests {
                 backend,
             }))
         }
-        async fn get_router_wanip(
+        async fn get_router_wan_ip(
             &self,
-            backend: UdpPortMappingBackend,
         ) -> Result<IpAddr, anyhow::Error>{
             Ok(IpAddr::V4("127.0.0.1:11010".parse().unwrap()))
         }

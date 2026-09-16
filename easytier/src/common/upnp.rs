@@ -224,59 +224,76 @@ pub(crate) async fn establish_udp_port_mapping(
 
 pub(crate) async fn get_router_wan_ip(
     net_ns: NetNS,
-    backend: UdpPortMappingBackend,
+) -> anyhow::Result<IpAddr> {
+    match get_router_wan_ip_igd(&net_ns).await {
+        Ok(wan_ip) => return Ok(wan_ip),
+        Err(_err) => {
+            tracing::info!("igd get route wan ip failed, retry using natpmp");
+        }
+    };
+    match get_router_wan_ip_natpmp(&net_ns).await {
+        Ok(wan_ip) => return Ok(wan_ip),
+        Err(_err) =>{
+            tracing::info!("natpmp get route wan ip failed");
+        }
+    };
+    anyhow::bail!("get route ip failed by using two method");
+}
+
+async fn get_router_wan_ip_igd(
+    net_ns: &NetNS,
 ) -> anyhow::Result<IpAddr> {
     let local_listener  = "udp://0.0.0.0:11010".parse::<url::Url>().unwrap();
-    match backend {
-        UdpPortMappingBackend::Igd =>{
-            let (gateway, _) =
-                discover_igd_gateway_in_netns(net_ns.clone(), local_listener.clone())
-                    .await
-                    .map_err(UdpPortMappingAttemptError::discovery)?;
-            gateway.get_external_ip()
+    let (gateway, _) =
+        discover_igd_gateway_in_netns(net_ns.clone(), local_listener.clone())
             .await
-            .with_context(|| {
-                        format!(
-                            "get_router_wan_ip by igd method failed"
-                        )
-                    })
-        },
-        UdpPortMappingBackend::NatPmp =>{
-            let (gateway, _) =
-                discover_nat_pmp_gateway_in_netns(net_ns.clone(), local_listener.clone())
-                    .await
-                    .map_err(UdpPortMappingAttemptError::discovery)?;
-            let mut client = new_tokio_natpmp_with(gateway)
-                .await
-                .with_context(|| format!("create nat-pmp client for gateway {gateway}"))?;
-            client
-                .send_public_address_request()
-                .await
-                .with_context(|| {
-                    format!(
-                        "send nat-pmp get public_address failed, gateway={gateway}"
-                    )
-                })?;
+            .map_err(UdpPortMappingAttemptError::discovery)?;
+    gateway.get_external_ip()
+    .await
+    .with_context(|| {
+                format!(
+                    "get_router_wan_ip by igd method failed"
+                )
+            })
+}
 
-            let response = tokio::time::timeout(NAT_PMP_RESPONSE_TIMEOUT, client.read_response_or_retry())
-                .await
-                .with_context(|| {
-                    format!(
-                        "wait nat-pmp udp mapping response gateway={gateway}"
-                    )
-                })?
-                .map_err(anyhow::Error::from)
-                .with_context(|| {
-                    format!(
-                        "read nat-pmp udp mapping response gateway={gateway}"
-                    )
-                })?;
+async fn get_router_wan_ip_natpmp(
+    net_ns: &NetNS,
+) -> anyhow::Result<IpAddr> {
+    let local_listener  = "udp://0.0.0.0:11010".parse::<url::Url>().unwrap();
+    let (gateway, _) =
+        discover_nat_pmp_gateway_in_netns(net_ns.clone(), local_listener.clone())
+            .await
+            .map_err(UdpPortMappingAttemptError::discovery)?;
+    let mut client = new_tokio_natpmp_with(gateway)
+        .await
+        .with_context(|| format!("create nat-pmp client for gateway {gateway}"))?;
+    client
+        .send_public_address_request()
+        .await
+        .with_context(|| {
+            format!(
+                "send nat-pmp get public_address failed, gateway={gateway}"
+            )
+        })?;
 
-            match response {
-                NatPmpResponse::Gateway(r) => Ok(IpAddr::V4(r.public_address().clone())),
-                _ => bail!("Natpmp response invalid: {response:?}")
-            }
-        }
+    let response = tokio::time::timeout(NAT_PMP_RESPONSE_TIMEOUT, client.read_response_or_retry())
+        .await
+        .with_context(|| {
+            format!(
+                "wait nat-pmp udp mapping response gateway={gateway}"
+            )
+        })?
+        .map_err(anyhow::Error::from)
+        .with_context(|| {
+            format!(
+                "read nat-pmp udp mapping response gateway={gateway}"
+            )
+        })?;
+
+    match response {
+        NatPmpResponse::Gateway(r) => Ok(IpAddr::V4(r.public_address().clone())),
+        _ => bail!("Natpmp response invalid: {response:?}")
     }
 }
 

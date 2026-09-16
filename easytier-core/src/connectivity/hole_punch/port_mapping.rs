@@ -107,9 +107,8 @@ pub trait UdpPortMappingPlatform: Send + Sync + 'static {
         tokio::spawn(lifecycle);
     }
 
-    async fn get_router_wanip(
-        &self,
-        backend: UdpPortMappingBackend
+    async fn get_router_wan_ip(
+        &self
     ) -> Result<IpAddr, anyhow::Error>;
 }
 
@@ -121,8 +120,6 @@ struct ManagedUdpPortMappingLease {
     stop_tx: Option<oneshot::Sender<()>>,
 }
 pub(crate) struct ManagedDirectUdpPortMappingLease {
-    events: Arc<dyn CoreEventSink>,
-    local_listener: url::Url,
     backend: UdpPortMappingBackend,
     wan_ip: Ipv4Addr,
     gateway_external_port: u16,
@@ -132,9 +129,6 @@ pub(crate) struct ManagedDirectUdpPortMappingLease {
 impl ManagedDirectUdpPortMappingLease {
     pub fn get_wan_addr(&self) -> SocketAddr{
         SocketAddr::V4(SocketAddrV4::new(self.wan_ip, self.gateway_external_port))
-    }
-    pub fn get_local_addr(&self) -> SocketAddr{
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.local_listener.port().unwrap()))
     }
 }
 
@@ -229,7 +223,6 @@ pub(crate) async fn start_udp_port_mapping(
 
 pub(crate) async fn start_direct_udp_port_mapping(
     platform: Arc<dyn UdpPortMappingPlatform>,
-    events: Arc<dyn CoreEventSink>,
     local_listener: &url::Url,
 ) -> anyhow::Result<Option<ManagedDirectUdpPortMappingLease>> {
     if !should_map_udp_listener(local_listener) {
@@ -238,7 +231,7 @@ pub(crate) async fn start_direct_udp_port_mapping(
 
     let mapping = discover_udp_port_mapping(platform.as_ref(), local_listener).await?;
     let backend = mapping.backend();
-    let IpAddr::V4(wan_ip) = platform.get_router_wanip(backend).await? else {
+    let IpAddr::V4(wan_ip) = platform.get_router_wan_ip().await? else {
         anyhow::bail!("router wan ip is not ipv4");
     };
     let gateway_external_port = mapping.gateway_external_port();
@@ -248,7 +241,7 @@ pub(crate) async fn start_direct_udp_port_mapping(
         local_addr = %mapping.local_addr(),
         gateway_external_port,
         %wan_ip,
-        "udp port mapping established"
+        "directconnect udp port mapping established"
     );
 
     let (stop_tx, stop_rx) = oneshot::channel();
@@ -262,8 +255,6 @@ pub(crate) async fn start_direct_udp_port_mapping(
     );
 
     Ok(Some(ManagedDirectUdpPortMappingLease {
-        events,
-        local_listener: local_listener.clone(),
         backend,
         wan_ip,
         gateway_external_port,
@@ -349,7 +340,7 @@ async fn run_udp_port_mapping_lifecycle(
             _ = &mut stop_rx => break,
         }
     }
-
+    tracing::info!(%local_listener, "mytracing- ManagedDirectUdpPortMappingLease dropping");
     if let Err(error) = mapping.remove().await {
         tracing::debug!(
             err = ?error,
@@ -460,9 +451,8 @@ mod tests {
                 removals: self.removals.clone(),
             }))
         }
-        async fn get_router_wanip(
+        async fn get_router_wan_ip(
             &self,
-            backend: UdpPortMappingBackend,
         ) -> Result<IpAddr, anyhow::Error>{
             Ok(IpAddr::V4("127.0.0.1:11010".parse().unwrap()))
         }
