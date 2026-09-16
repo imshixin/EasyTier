@@ -320,7 +320,7 @@ where
                 // }
                 return Ok(());
             }
-            anyhow::bail!("mytracing-skipped update direct mapping listener");
+            anyhow::bail!("mytracing-skipped update direct mapping listener due to same wan ip");
         };
         let cancel = self.cancel.clone();
         tokio::spawn(async move {
@@ -334,7 +334,7 @@ where
                         match listener_loop().await {
                             Ok(_result) => {},
                             Err(_e) =>{
-                                tracing::info!("update listener skipped or failed");
+                                tracing::info!("update listener skipped or failed: {}", _e);
                             }
                         }
                     }
