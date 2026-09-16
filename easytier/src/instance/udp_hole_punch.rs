@@ -34,11 +34,10 @@ impl UdpPortMappingPlatform for RuntimeUdpHolePunchPlatform {
     ) {
         upnp::spawn_udp_port_mapping_lifecycle(self.net_ns.clone(), local_listener, lifecycle);
     }
-    async fn get_router_wanip(
+    async fn get_router_wan_ip(
         &self,
-        backend: UdpPortMappingBackend,
     ) -> Result<IpAddr, anyhow::Error> {
-        upnp::get_router_wan_ip(self.net_ns.clone(), backend).await
+        upnp::get_router_wan_ip(self.net_ns.clone()).await
     }
 }
 
