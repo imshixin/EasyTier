@@ -4,19 +4,20 @@ use std::{
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
-use easytier_core::connectivity::hole_punch::port_mapping::{
-    ActiveUdpPortMapping as CoreActiveUdpPortMapping, UdpPortMappingAttemptError,
-    UdpPortMappingBackend, UdpPortMappingLifecycle,
-};
+use easytier_core::connectivity::{hole_punch::port_mapping::UdpPortMappingLifecycle, port_mapping::{
+    ActivePortMapping as CoreActivePortMapping, PortMappingAttemptError,
+    PortMappingBackend as CorePortMappingBackend, PortMappingLifecycle,
+    PortMappingProtocol as CorePortMappingProtocol
+}};
 use igd_next::{
-    AddAnyPortError, PortMappingProtocol, SearchOptions,
+    AddAnyPortError, PortMappingProtocol as IgdPortMappingProtocol, SearchOptions,
     aio::{
         Gateway,
         tokio::{Tokio, search_gateway},
     },
 };
 use natpmp::{
-    Protocol as NatPmpProtocol, Response as NatPmpResponse, new_tokio_natpmp, new_tokio_natpmp_with,
+    Protocol as NatPmpMappingProtocol, Response as NatPmpResponse, new_tokio_natpmp, new_tokio_natpmp_with,
 };
 
 use super::netns::NetNS;
@@ -30,20 +31,20 @@ const UPNP_DESCRIPTION: &str = "EasyTier udp hole punch";
 type TokioGateway = Gateway<Tokio>;
 
 enum PortMappingBackend {
-    NatPmp { gateway: Ipv4Addr },
-    Igd { gateway: TokioGateway },
+    NatPmp { gateway: Ipv4Addr, protocol: NatPmpMappingProtocol },
+    Igd { gateway: TokioGateway, protocol: IgdPortMappingProtocol },
 }
 
-struct ActiveUdpPortMapping {
+struct ActivePortMapping {
     backend: PortMappingBackend,
     local_listener: url::Url,
     local_addr: SocketAddr,
     gateway_external_port: u16,
 }
 
-impl fmt::Debug for ActiveUdpPortMapping {
+impl fmt::Debug for ActivePortMapping {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ActiveUdpPortMapping")
+        f.debug_struct("ActivePortMapping")
             .field("backend", &self.core_backend())
             .field("local_listener", &self.local_listener)
             .field("local_addr", &self.local_addr)
@@ -52,11 +53,24 @@ impl fmt::Debug for ActiveUdpPortMapping {
     }
 }
 
-impl ActiveUdpPortMapping {
-    fn core_backend(&self) -> UdpPortMappingBackend {
+impl ActivePortMapping {
+    fn core_backend(&self) -> CorePortMappingBackend {
         match self.backend {
-            PortMappingBackend::Igd { .. } => UdpPortMappingBackend::Igd,
-            PortMappingBackend::NatPmp { .. } => UdpPortMappingBackend::NatPmp,
+            PortMappingBackend::Igd { .. } => CorePortMappingBackend::Igd,
+            PortMappingBackend::NatPmp { .. } => CorePortMappingBackend::NatPmp,
+        }
+    }
+
+    fn core_protocol(&self) -> CorePortMappingProtocol {
+        match self.backend {
+            PortMappingBackend::Igd { gateway: _, protocol } => match protocol {
+                IgdPortMappingProtocol::TCP => CorePortMappingProtocol::Tcp,
+                IgdPortMappingProtocol::UDP => CorePortMappingProtocol::Udp,
+            },
+            PortMappingBackend::NatPmp { gateway: _, protocol } => match protocol {
+                NatPmpMappingProtocol::TCP => CorePortMappingProtocol::Tcp,
+                NatPmpMappingProtocol::UDP => CorePortMappingProtocol::Udp,
+            },
         }
     }
 
@@ -73,17 +87,18 @@ impl ActiveUdpPortMapping {
     async fn establish_via_nat_pmp(
         local_listener: &url::Url,
         gateway: Ipv4Addr,
+        protocol: NatPmpMappingProtocol,
         local_addr: SocketAddr,
     ) -> anyhow::Result<Self> {
         let gateway_external_port =
-            add_udp_mapping_port_nat_pmp(gateway, local_addr, local_listener)
+            add_mapping_port_nat_pmp(gateway, protocol, local_addr, local_listener)
                 .await
                 .with_context(|| {
-                    format!("map udp socket for {local_listener} via nat-pmp gateway {gateway}")
+                    format!("map socket for {local_listener} via nat-pmp gateway {gateway}")
                 })?;
 
         Ok(Self {
-            backend: PortMappingBackend::NatPmp { gateway },
+            backend: PortMappingBackend::NatPmp { gateway, protocol },
             local_listener: local_listener.clone(),
             local_addr,
             gateway_external_port,
@@ -110,9 +125,10 @@ impl ActiveUdpPortMapping {
     async fn establish_via_igd(
         local_listener: &url::Url,
         gateway: TokioGateway,
+        protocol: IgdPortMappingProtocol,
         local_addr: SocketAddr,
     ) -> anyhow::Result<Self> {
-        let gateway_external_port = add_udp_mapping_port_igd(&gateway, local_addr, local_listener)
+        let gateway_external_port = add_mapping_port_igd(&gateway, protocol, local_addr, local_listener)
             .await
             .with_context(|| {
                 format!(
@@ -122,7 +138,7 @@ impl ActiveUdpPortMapping {
             })?;
 
         Ok(Self {
-            backend: PortMappingBackend::Igd { gateway },
+            backend: PortMappingBackend::Igd { gateway, protocol },
             local_listener: local_listener.clone(),
             local_addr,
             gateway_external_port,
@@ -131,18 +147,20 @@ impl ActiveUdpPortMapping {
 
     async fn renew(&self) -> anyhow::Result<()> {
         match &self.backend {
-            PortMappingBackend::NatPmp { gateway } => {
-                renew_udp_mapping_nat_pmp(
+            PortMappingBackend::NatPmp { gateway , protocol} => {
+                renew_mapping_nat_pmp(
                     *gateway,
+                    protocol.clone(),
                     self.local_addr,
                     self.gateway_external_port,
                     &self.local_listener,
                 )
                 .await
             }
-            PortMappingBackend::Igd { gateway } => {
-                renew_udp_mapping_igd(
+            PortMappingBackend::Igd { gateway , protocol} => {
+                renew_mapping_igd(
                     gateway,
+                    protocol.clone(),
                     self.local_addr,
                     self.gateway_external_port,
                     &self.local_listener,
@@ -154,27 +172,36 @@ impl ActiveUdpPortMapping {
 
     async fn remove(&self) -> anyhow::Result<()> {
         match &self.backend {
-            PortMappingBackend::NatPmp { gateway } => {
-                remove_udp_mapping_nat_pmp(
+            PortMappingBackend::NatPmp { gateway , protocol} => {
+                remove_mapping_nat_pmp(
                     *gateway,
+                    protocol.clone(),
                     self.local_addr,
                     self.gateway_external_port,
                     &self.local_listener,
                 )
                 .await
             }
-            PortMappingBackend::Igd { gateway } => {
-                remove_udp_mapping_igd(gateway, self.gateway_external_port, &self.local_listener)
-                    .await
+            PortMappingBackend::Igd { gateway , protocol} => {
+                remove_mapping_igd(
+                    gateway,
+                    protocol.clone(),
+                    self.gateway_external_port,
+                    &self.local_listener
+                ).await
             }
         }
     }
 }
 
 #[async_trait]
-impl CoreActiveUdpPortMapping for ActiveUdpPortMapping {
-    fn backend(&self) -> UdpPortMappingBackend {
+impl CoreActivePortMapping for ActivePortMapping {
+    fn backend(&self) -> CorePortMappingBackend {
         self.core_backend()
+    }
+
+    fn protocol(&self) -> CorePortMappingProtocol {
+        self.core_protocol()
     }
 
     fn local_addr(&self) -> SocketAddr {
@@ -186,37 +213,40 @@ impl CoreActiveUdpPortMapping for ActiveUdpPortMapping {
     }
 
     async fn renew(&self) -> anyhow::Result<()> {
-        ActiveUdpPortMapping::renew(self).await
+        ActivePortMapping::renew(self).await
     }
 
     async fn remove(&self) -> anyhow::Result<()> {
-        ActiveUdpPortMapping::remove(self).await
+        ActivePortMapping::remove(self).await
     }
 }
 
-pub(crate) async fn establish_udp_port_mapping(
+pub(crate) async fn establish_port_mapping(
     net_ns: NetNS,
-    backend: UdpPortMappingBackend,
+    backend: CorePortMappingBackend,
+    protocol: CorePortMappingProtocol,
     local_listener: url::Url,
-) -> Result<Box<dyn CoreActiveUdpPortMapping>, UdpPortMappingAttemptError> {
+) -> Result<Box<dyn CoreActivePortMapping>, PortMappingAttemptError> {
     let mapping = match backend {
-        UdpPortMappingBackend::Igd => {
+        CorePortMappingBackend::Igd => {
             let (gateway, local_addr) =
                 discover_igd_gateway_in_netns(net_ns.clone(), local_listener.clone())
                     .await
-                    .map_err(UdpPortMappingAttemptError::discovery)?;
-            establish_igd_mapping_in_netns(net_ns, local_listener, gateway, local_addr)
+                    .map_err(PortMappingAttemptError::discovery)?;
+            let protocol = igd_protocol(&protocol);
+            establish_igd_mapping_in_netns(net_ns, local_listener, gateway, protocol, local_addr)
                 .await
-                .map_err(UdpPortMappingAttemptError::establishment)?
+                .map_err(PortMappingAttemptError::establishment)?
         }
-        UdpPortMappingBackend::NatPmp => {
+        CorePortMappingBackend::NatPmp => {
             let (gateway, local_addr) =
                 discover_nat_pmp_gateway_in_netns(net_ns.clone(), local_listener.clone())
                     .await
-                    .map_err(UdpPortMappingAttemptError::discovery)?;
-            establish_nat_pmp_mapping_in_netns(net_ns, local_listener, gateway, local_addr)
+                    .map_err(PortMappingAttemptError::discovery)?;
+            let protocol = natpmp_protocol(&protocol);
+            establish_nat_pmp_mapping_in_netns(net_ns, local_listener, gateway, protocol, local_addr)
                 .await
-                .map_err(UdpPortMappingAttemptError::establishment)?
+                .map_err(PortMappingAttemptError::establishment)?
         }
     };
     Ok(Box::new(mapping))
@@ -243,11 +273,11 @@ pub(crate) async fn get_router_wan_ip(
 async fn get_router_wan_ip_igd(
     net_ns: &NetNS,
 ) -> anyhow::Result<IpAddr> {
-    let local_listener  = "udp://0.0.0.0:11010".parse::<url::Url>().unwrap();
+    let local_listener  = "udp://0.0.0.0:11010".parse::<url::Url>().expect("static url should be valid");
     let (gateway, _) =
         discover_igd_gateway_in_netns(net_ns.clone(), local_listener.clone())
             .await
-            .map_err(UdpPortMappingAttemptError::discovery)?;
+            .map_err(PortMappingAttemptError::discovery)?;
     gateway.get_external_ip()
     .await
     .with_context(|| {
@@ -264,7 +294,7 @@ async fn get_router_wan_ip_natpmp(
     let (gateway, _) =
         discover_nat_pmp_gateway_in_netns(net_ns.clone(), local_listener.clone())
             .await
-            .map_err(UdpPortMappingAttemptError::discovery)?;
+            .map_err(PortMappingAttemptError::discovery)?;
     let mut client = new_tokio_natpmp_with(gateway)
         .await
         .with_context(|| format!("create nat-pmp client for gateway {gateway}"))?;
@@ -297,6 +327,30 @@ async fn get_router_wan_ip_natpmp(
     }
 }
 
+pub(crate) fn spawn_port_mapping_lifecycle(
+    net_ns: NetNS,
+    local_listener: url::Url,
+    lifecycle: PortMappingLifecycle,
+) {
+    if should_run_port_mapping_in_dedicated_thread(&net_ns) {
+        tokio::task::spawn_blocking(move || {
+            let _g = net_ns.guard();
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(lifecycle),
+                Err(err) => tracing::error!(
+                    ?err,
+                    %local_listener,
+                    "failed to build runtime for udp port mapping renew task"
+                ),
+            }
+        });
+    } else {
+        tokio::spawn(lifecycle);
+    }
+}
 pub(crate) fn spawn_udp_port_mapping_lifecycle(
     net_ns: NetNS,
     local_listener: url::Url,
@@ -327,7 +381,7 @@ async fn discover_igd_gateway_in_netns(
     local_listener: url::Url,
 ) -> anyhow::Result<(TokioGateway, SocketAddr)> {
     if !should_run_port_mapping_in_dedicated_thread(&net_ns) {
-        return ActiveUdpPortMapping::discover_igd_gateway(&net_ns, &local_listener).await;
+        return ActivePortMapping::discover_igd_gateway(&net_ns, &local_listener).await;
     }
 
     tokio::task::spawn_blocking(move || {
@@ -336,7 +390,7 @@ async fn discover_igd_gateway_in_netns(
             .enable_all()
             .build()
             .context("build runtime for igd gateway discovery")?
-            .block_on(ActiveUdpPortMapping::discover_igd_gateway(
+            .block_on(ActivePortMapping::discover_igd_gateway(
                 &net_ns,
                 &local_listener,
             ))
@@ -349,10 +403,11 @@ async fn establish_igd_mapping_in_netns(
     net_ns: NetNS,
     local_listener: url::Url,
     gateway: TokioGateway,
+    protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
-) -> anyhow::Result<ActiveUdpPortMapping> {
+) -> anyhow::Result<ActivePortMapping> {
     if !should_run_port_mapping_in_dedicated_thread(&net_ns) {
-        return ActiveUdpPortMapping::establish_via_igd(&local_listener, gateway, local_addr).await;
+        return ActivePortMapping::establish_via_igd(&local_listener, gateway, protocol, local_addr).await;
     }
 
     tokio::task::spawn_blocking(move || {
@@ -361,9 +416,10 @@ async fn establish_igd_mapping_in_netns(
             .enable_all()
             .build()
             .context("build runtime for igd mapping establishment")?
-            .block_on(ActiveUdpPortMapping::establish_via_igd(
+            .block_on(ActivePortMapping::establish_via_igd(
                 &local_listener,
                 gateway,
+                protocol,
                 local_addr,
             ))
     })
@@ -376,7 +432,7 @@ async fn discover_nat_pmp_gateway_in_netns(
     local_listener: url::Url,
 ) -> anyhow::Result<(Ipv4Addr, SocketAddr)> {
     if !should_run_port_mapping_in_dedicated_thread(&net_ns) {
-        return ActiveUdpPortMapping::discover_nat_pmp_gateway(&local_listener).await;
+        return ActivePortMapping::discover_nat_pmp_gateway(&local_listener).await;
     }
 
     tokio::task::spawn_blocking(move || {
@@ -385,7 +441,7 @@ async fn discover_nat_pmp_gateway_in_netns(
             .enable_all()
             .build()
             .context("build runtime for nat-pmp gateway discovery")?
-            .block_on(ActiveUdpPortMapping::discover_nat_pmp_gateway(
+            .block_on(ActivePortMapping::discover_nat_pmp_gateway(
                 &local_listener,
             ))
     })
@@ -397,10 +453,11 @@ async fn establish_nat_pmp_mapping_in_netns(
     net_ns: NetNS,
     local_listener: url::Url,
     gateway: Ipv4Addr,
+    protocol: NatPmpMappingProtocol,
     local_addr: SocketAddr,
-) -> anyhow::Result<ActiveUdpPortMapping> {
+) -> anyhow::Result<ActivePortMapping> {
     if !should_run_port_mapping_in_dedicated_thread(&net_ns) {
-        return ActiveUdpPortMapping::establish_via_nat_pmp(&local_listener, gateway, local_addr)
+        return ActivePortMapping::establish_via_nat_pmp(&local_listener, gateway, protocol, local_addr)
             .await;
     }
 
@@ -410,9 +467,10 @@ async fn establish_nat_pmp_mapping_in_netns(
             .enable_all()
             .build()
             .context("build runtime for nat-pmp mapping establishment")?
-            .block_on(ActiveUdpPortMapping::establish_via_nat_pmp(
+            .block_on(ActivePortMapping::establish_via_nat_pmp(
                 &local_listener,
                 gateway,
+                protocol,
                 local_addr,
             ))
     })
@@ -424,14 +482,15 @@ fn should_run_port_mapping_in_dedicated_thread(net_ns: &NetNS) -> bool {
     net_ns.name().is_some()
 }
 
-async fn add_udp_mapping_port_igd(
+async fn add_mapping_port_igd(
     gateway: &TokioGateway,
+    protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
     local_listener: &url::Url,
 ) -> anyhow::Result<u16> {
     match gateway
         .add_any_port(
-            PortMappingProtocol::UDP,
+            protocol,
             local_addr,
             UPNP_LEASE_DURATION_SECS,
             UPNP_DESCRIPTION,
@@ -450,7 +509,7 @@ async fn add_udp_mapping_port_igd(
 
             gateway
                 .add_port(
-                    PortMappingProtocol::UDP,
+                    protocol,
                     local_addr.port(),
                     local_addr,
                     UPNP_LEASE_DURATION_SECS,
@@ -468,12 +527,13 @@ async fn add_udp_mapping_port_igd(
     }
 }
 
-async fn add_udp_mapping_port_nat_pmp(
+async fn add_mapping_port_nat_pmp(
     gateway: Ipv4Addr,
+    protocol: NatPmpMappingProtocol,
     local_addr: SocketAddr,
     local_listener: &url::Url,
 ) -> anyhow::Result<u16> {
-    match request_nat_pmp_mapping(gateway, local_addr.port(), 0, UPNP_LEASE_DURATION_SECS).await {
+    match request_nat_pmp_mapping(gateway, protocol, local_addr.port(), 0, UPNP_LEASE_DURATION_SECS).await {
         Ok(external_port) => Ok(external_port),
         Err(any_port_err) => {
             tracing::debug!(
@@ -486,6 +546,7 @@ async fn add_udp_mapping_port_nat_pmp(
 
             request_nat_pmp_mapping(
                 gateway,
+                protocol,
                 local_addr.port(),
                 local_addr.port(),
                 UPNP_LEASE_DURATION_SECS,
@@ -502,6 +563,7 @@ async fn add_udp_mapping_port_nat_pmp(
 
 async fn request_nat_pmp_mapping(
     gateway: Ipv4Addr,
+    protocol: NatPmpMappingProtocol,
     private_port: u16,
     public_port: u16,
     lifetime_secs: u32,
@@ -511,7 +573,7 @@ async fn request_nat_pmp_mapping(
         .with_context(|| format!("create nat-pmp client for gateway {gateway}"))?;
     client
         .send_port_mapping_request(
-            NatPmpProtocol::UDP,
+            protocol,
             private_port,
             public_port,
             lifetime_secs,
@@ -527,13 +589,13 @@ async fn request_nat_pmp_mapping(
         .await
         .with_context(|| {
             format!(
-                "wait nat-pmp udp mapping response private_port={private_port} gateway={gateway}"
+                "wait nat-pmp udp mapping response protocol={protocol:?} private_port={private_port} gateway={gateway}"
             )
         })?
         .map_err(anyhow::Error::from)
         .with_context(|| {
             format!(
-                "read nat-pmp udp mapping response private_port={private_port} gateway={gateway}"
+                "read nat-pmp udp mapping response protocol={protocol:?} private_port={private_port} gateway={gateway}"
             )
         })?;
 
@@ -545,14 +607,16 @@ async fn request_nat_pmp_mapping(
     }
 }
 
-async fn renew_udp_mapping_nat_pmp(
+async fn renew_mapping_nat_pmp(
     gateway: Ipv4Addr,
+    protocol: NatPmpMappingProtocol,
     local_addr: SocketAddr,
     external_port: u16,
     local_listener: &url::Url,
 ) -> anyhow::Result<()> {
     request_nat_pmp_mapping(
         gateway,
+        protocol,
         local_addr.port(),
         external_port,
         UPNP_LEASE_DURATION_SECS,
@@ -562,13 +626,14 @@ async fn renew_udp_mapping_nat_pmp(
     .with_context(|| format!("renew udp port mapping {local_listener}"))
 }
 
-async fn remove_udp_mapping_nat_pmp(
+async fn remove_mapping_nat_pmp(
     gateway: Ipv4Addr,
+    protocol: NatPmpMappingProtocol,
     local_addr: SocketAddr,
     external_port: u16,
     local_listener: &url::Url,
 ) -> anyhow::Result<()> {
-    request_nat_pmp_mapping(gateway, local_addr.port(), external_port, 0)
+    request_nat_pmp_mapping(gateway, protocol, local_addr.port(), external_port, 0)
         .await
         .map(|_| ())
         .with_context(|| format!("remove udp port mapping {local_listener}"))
@@ -604,31 +669,47 @@ async fn resolve_internal_addr(
     Ok(SocketAddr::new(ip.into(), port))
 }
 
-async fn renew_udp_mapping_igd(
+async fn renew_mapping_igd(
     gateway: &TokioGateway,
+    protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
     external_port: u16,
     local_listener: &url::Url,
 ) -> anyhow::Result<()> {
     gateway
         .add_port(
-            PortMappingProtocol::UDP,
+            protocol,
             external_port,
             local_addr,
             UPNP_LEASE_DURATION_SECS,
             UPNP_DESCRIPTION,
         )
         .await
-        .with_context(|| format!("renew udp port mapping {local_listener}"))
+        .with_context(|| format!("renew port mapping {local_listener}"))
 }
 
-async fn remove_udp_mapping_igd(
+async fn remove_mapping_igd(
     gateway: &TokioGateway,
+    protocol: IgdPortMappingProtocol,
     external_port: u16,
     local_listener: &url::Url,
 ) -> anyhow::Result<()> {
     gateway
-        .remove_port(PortMappingProtocol::UDP, external_port)
+        .remove_port(protocol, external_port)
         .await
-        .with_context(|| format!("remove udp port mapping {local_listener}"))
+        .with_context(|| format!("remove port mapping {local_listener}"))
+}
+
+fn igd_protocol(protocol: &CorePortMappingProtocol) -> IgdPortMappingProtocol{
+    match protocol {
+        CorePortMappingProtocol::Tcp => IgdPortMappingProtocol::TCP,
+        CorePortMappingProtocol::Udp => IgdPortMappingProtocol::UDP,
+    }
+}
+
+fn natpmp_protocol(protocol: &CorePortMappingProtocol) -> NatPmpMappingProtocol{
+    match protocol {
+        CorePortMappingProtocol::Tcp => NatPmpMappingProtocol::TCP,
+        CorePortMappingProtocol::Udp => NatPmpMappingProtocol::UDP,
+    }
 }

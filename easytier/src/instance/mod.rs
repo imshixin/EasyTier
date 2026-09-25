@@ -12,6 +12,7 @@ pub(crate) mod runtime_host;
 pub(crate) mod test_instance;
 #[cfg(feature = "upnp")]
 pub(crate) mod udp_hole_punch;
+pub(crate) mod port_mapping_platform;
 
 pub(crate) mod listeners;
 
