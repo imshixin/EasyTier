@@ -14,6 +14,7 @@ pub(crate) mod test_instance;
 pub(crate) mod udp_hole_punch;
 pub(crate) mod port_mapping_platform;
 
+pub(crate) mod mapped_listener_manager;
 pub(crate) mod listeners;
 
 #[cfg(feature = "public-ipv6-provider")]

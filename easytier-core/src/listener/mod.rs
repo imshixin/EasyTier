@@ -149,6 +149,13 @@ impl Default for ListenerManagerOptions {
     }
 }
 
+#[async_trait]
+pub trait MappedListenerManager: Send + Sync + 'static {
+    async fn get_mapped_listeners(&self) -> Vec<Url>;
+    async fn add_mapped_listeners(&self, new_listener: &Url);
+    async fn remove_mapped_listeners(&self, old_listener: &Url);
+}
+
 struct DirectMappingListenerState {
     wan_url: Url,
     _mapping_lease: ManagedDirectUdpPortMappingLease,
@@ -177,7 +184,8 @@ impl DirectMappingListenerState{
 
 pub struct DirectMappingListennerManager<Accepted, H: ?Sized> {
     handler: Arc<H>,
-    platform: Option<Arc<dyn UdpPortMappingPlatform + 'static>>,
+    platform: Option<Arc<dyn PortMappingPlatform + 'static>>,
+    mapped_listener_manager: Option<Arc<dyn MappedListenerManager + 'static>>,
     registry: Arc<RunningListenerRegistry>,
     events: Arc<dyn CoreEventSink>,
     options: ListenerManagerOptions,
@@ -188,7 +196,7 @@ pub struct DirectMappingListennerManager<Accepted, H: ?Sized> {
     accepted_task_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<AcceptedTask>>>,
     operation: Mutex<()>,
     state: Arc<Mutex<Option<DirectMappingListenerState>>>,
-    creator: Arc<dyn Fn(SocketAddr, Url) -> ListenerCreatorArc<Accepted> + Send + Sync + 'static>
+    creator: ListenerCreatorArc<Accepted>
 }
 
 impl<Accepted , H> DirectMappingListennerManager<Accepted , H>
@@ -201,7 +209,8 @@ where
         events: Arc<dyn CoreEventSink>,
         registry: Arc<RunningListenerRegistry>,
         platform: Option<Arc<dyn UdpPortMappingPlatform + 'static>>,
-        creator:  Arc<dyn Fn(SocketAddr, Url) -> ListenerCreatorArc<Accepted> + Send + Sync + 'static>
+        mapped_listener_manager: Option<Arc<dyn MappedListenerManager + 'static>>,
+        creator:  ListenerCreatorArc<Accepted>,
     ) -> Self {
         let (accepted_tasks, accepted_task_rx) = AcceptedTaskSpawner::new();
         let mut options = ListenerManagerOptions::default();
@@ -209,6 +218,7 @@ where
         Self {
             handler,
             platform,
+            mapped_listener_manager,
             registry,
             events,
             options,
@@ -225,7 +235,11 @@ where
 
     async fn run(&self) -> anyhow::Result<()>{
         let Some(platform) = &self.platform else {
-            tracing::info!("mytracing-platform is none, disabled direct connect via upnp port mapping");
+            tracing::info!("mytracing- platform is none, disabled direct connect via upnp port mapping");
+            return Ok(());
+        };
+        let Some(manager) = &self.mapped_listener_manager else {
+            tracing::info!("mytracing- mapped_listener_manager is none, disabled direct connect via upnp port mapping");
             return Ok(());
         };
         let _operation = self.operation.lock().await;
@@ -258,6 +272,8 @@ where
         let registry = self.registry.clone();
         let options = self.options.clone();
         let accepted_tasks = self.accepted_tasks.clone();
+        let manager = manager.clone();
+        let platform = platform.clone();
 
         let state = self.state.clone();
         let mut state_val = self.state.lock().await;
@@ -270,15 +286,20 @@ where
             options.clone(),
             accepted_tasks.clone(),
             creator.clone(),
-        ).await?;
-        state_val.replace(first_state);
+        ).await;
+        match first_state {
+            Ok(state) => {
+                manager.add_mapped_listeners(&state.wan_url).await;
+                let listeners = manager.get_mapped_listeners().await;
+                tracing::info!(mapped_listeners = ?listeners, "mytracing- added new mapped listener");
+                state_val.replace(state);
+            },
+            Err(e) =>{
+                tracing::info!("establish first mapped listener failed: {:?}", e);
+            }
+        };
 
-        let platform = self.platform.clone();
         let listener_loop = async move || -> anyhow::Result<()> {
-            let Some(platform) = &platform else {
-                tracing::info!("mytracing-platform is none, disabled direct connect via upnp port mapping");
-                return Ok(());
-            };
             let mut state = state.lock().await;
             let need_update = match state.as_ref() {
                 Some(state) => {
@@ -309,9 +330,12 @@ where
                     accepted_tasks.clone(),
                     creator.clone(),
                 ).await?;
+                let new_url = new_state.wan_url.clone();
                 if let Some(_old_state) = state.replace(new_state) {
                     _old_state.lease_cancel.cancel();
+                    manager.remove_mapped_listeners(&_old_state.wan_url).await;
                 }
+                manager.add_mapped_listeners(&new_url).await;
                 // match old_state {
                 //     Some(old_state) =>{
                 //         tracing::info!(%old_state.wan_url, "cancelled old listener state");
@@ -371,20 +395,18 @@ async fn establish_listener_state<Accepted, H>(
     platform: Arc<dyn UdpPortMappingPlatform + 'static>,
     options: ListenerManagerOptions,
     accepted_tasks: AcceptedTaskSpawner,
-    creator:  Arc<dyn Fn(SocketAddr, Url) -> ListenerCreatorArc<Accepted> + Send + Sync + 'static>,
+    creator:  ListenerCreatorArc<Accepted>,
 ) -> anyhow::Result<DirectMappingListenerState>
 where
     Accepted: Send + 'static,
     H: AcceptedSocketHandler<Accepted> + ?Sized + 'static,
  {
-    let local_listener: Url = "udp://0.0.0.0:0".parse().unwrap();
-    let local_addr = "0.0.0.0:0".parse().unwrap();
-    let creator2 = creator(local_addr, local_listener);
+
     let initial_listener = tokio::select! {
             _ = global_cancel.cancelled() => {
                 anyhow::bail!("listener manager stopped during startup")
             }
-            result = listen_once(creator2.clone()) => {
+            result = listen_once(creator.clone()) => {
                 result.with_context(|| "required listener failed to start")?
             }
     };
@@ -405,7 +427,7 @@ where
         new_wan_url.clone(),
     );
     let listener = run_listener(
-        creator2,
+        creator.clone(),
         handler,
         events,
         registry,

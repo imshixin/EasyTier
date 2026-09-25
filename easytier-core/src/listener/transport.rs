@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData, net::{SocketAddr}, sync::Arc};
+use std::{fmt, marker::PhantomData, sync::Arc};
 
 use async_trait::async_trait;
 use rand::seq::SliceRandom as _;
@@ -7,11 +7,11 @@ use url::Url;
 
 use crate::{
     connectivity::{
-        hole_punch::port_mapping::{UdpPortMappingPlatform}, manual::resolve_url_addrs, protocol::{
+        hole_punch::port_mapping::UdpPortMappingPlatform, manual::resolve_url_addrs, protocol::{
             ServerProtocolAdmissionController, ServerProtocolUpgrade, ServerProtocolUpgrader, raw,
         },
     }, events::{CoreEvent, CoreEventSink}, host::dns::DnsResolver, listener::{
-        AcceptedSocketHandler, DirectMappingListennerManager, ListenerFactory, ListenerManager, RunningListenerRegistry, plan::ListenerPlanFailure,
+        AcceptedSocketHandler, DirectMappingListennerManager, ListenerFactory, ListenerManager, MappedListenerManager, RunningListenerRegistry, plan::ListenerPlanFailure,
     }, socket::{
         IpVersion, ListenerConnectionCounter, SocketContext, SocketListener, tcp::{TcpListenOptions, TcpSocketListener, VirtualTcpListener, VirtualTcpListenerFactory}, udp::{
             UdpBindOptions, UdpSession, UdpSessionAcceptKind, UdpSessionListenRequest, UdpSessionSocket, UdpSessionSocketListener, VirtualUdpSocketFactory,
@@ -595,7 +595,8 @@ where
         handler: Arc<dyn AcceptedSocketHandler<AcceptedTransport<HostAcceptedTcpSocket<H>>>>,
         events: Arc<dyn CoreEventSink>,
         registry: Arc<RunningListenerRegistry>,
-        platform: Option<Arc<dyn UdpPortMappingPlatform + 'static>>
+        platform: Option<Arc<dyn UdpPortMappingPlatform + 'static>>,
+        mapped_listener_manager: Option<Arc<dyn MappedListenerManager + 'static>>,
     ) -> Self {
         let mut manager = ListenerManager::new_with_registry(
             handler.clone(),
@@ -611,26 +612,24 @@ where
             events.clone(),
             registry.clone(),
             platform.clone(),
-            Arc::new(move |local_addr: SocketAddr, wan_url: Url| {
-                tracing::info!(%local_addr, %wan_url, "mytracing-creating listener");
+            mapped_listener_manager,
+            Arc::new(move || {
+                let local_listener: Url = "udp://0.0.0.0:0".parse().unwrap();
+                let local_addr = "0.0.0.0:0".parse().unwrap();
                 let mut bind_options = UdpBindOptions::direct_connect();
                 bind_options.local_addr = Some(local_addr);
                 let options = UdpSessionListenRequest {
                     bind: bind_options
                 };
                 let kind = UdpSessionAcceptKind::EasyTierMux;
-                let host = host1.clone();
-                let dns = dns1.clone();
 
-                Arc::new(move || {
-                    Box::new(UdpTransportListener::new(
-                        wan_url.clone(),
-                        options.clone(),
-                        kind,
-                        host.clone(),
-                        dns.clone()
-                    ))
-                })
+                Box::new(UdpTransportListener::new(
+                    local_listener.clone(),
+                    options.clone(),
+                    kind,
+                    host1.clone(),
+                    dns1.clone()
+                ))
             })
         );
 
@@ -1544,6 +1543,7 @@ mod tests {
             Arc::new(RecordingListenerEvents::default()),
             Arc::new(RunningListenerRegistry::default()),
             None,
+            None,
         );
 
         service.start().await.unwrap();
@@ -1598,7 +1598,8 @@ mod tests {
             Arc::new(|_: AcceptedTransport<MockTcpSocket>| async { Ok(()) }),
             events.clone(),
             Arc::new(RunningListenerRegistry::default()),
-            None
+            None,
+            None,
         );
 
         service.start().await.unwrap();
