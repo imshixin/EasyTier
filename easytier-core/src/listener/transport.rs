@@ -602,7 +602,7 @@ where
         handler: Arc<dyn AcceptedSocketHandler<AcceptedTransport<HostAcceptedTcpSocket<H>>>>,
         events: Arc<dyn CoreEventSink>,
         registry: Arc<RunningListenerRegistry>,
-        direct_mapped_listeners: Option<Vec<url::Url>>,
+        upnp_listeners: Option<Vec<url::Url>>,
         platform: Option<Arc<dyn PortMappingPlatform + 'static>>,
         mapped_listener_manager: Option<Arc<dyn MappedListenerManager + 'static>>,
     ) -> Self {
@@ -620,7 +620,7 @@ where
             registry.clone(),
             platform.clone(),
             mapped_listener_manager,
-            direct_mapped_listeners,
+            upnp_listeners,
             Arc::new(move |protocol: PortMappingProtocol| {
                 let local_listener: Url = format!("{}://0.0.0.0:0", protocol.name()).parse().unwrap();
                 let local_addr = "0.0.0.0:0".parse().unwrap();

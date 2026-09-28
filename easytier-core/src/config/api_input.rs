@@ -18,6 +18,32 @@ fn parse_mapped_listener_urls(mapped_listeners: &[String]) -> Result<Vec<url::Ur
         .parse_urls(mapped_listeners)
 }
 
+/// Port mapping only supports tcp/udp, and the listener is created on the port
+/// carried by the url, so an explicit port is required.
+fn parse_upnp_listener_urls(upnp_listeners: &[String]) -> Result<Vec<url::Url>, anyhow::Error> {
+    upnp_listeners
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let url: url::Url = value
+                .parse()
+                .with_context(|| format!("upnp listener is not a valid url: {}", value))?;
+            if !matches!(url.scheme(), "tcp" | "udp") {
+                anyhow::bail!(
+                    "unsupported upnp listener scheme {}, only tcp/udp are supported: {}",
+                    url.scheme(),
+                    url
+                );
+            }
+            if url.port().is_none() {
+                anyhow::bail!("upnp listener port is missing: {}", url);
+            }
+            Ok(url)
+        })
+        .collect()
+}
+
 pub fn add_proxy_network_to_config(
     proxy_network: &str,
     cfg: &TomlConfigLoader,
@@ -279,6 +305,13 @@ impl NetworkConfigExt for NetworkConfig {
         if !self.mapped_listeners.is_empty() {
             let mapped_listeners = parse_mapped_listener_urls(&self.mapped_listeners)?;
             cfg.set_mapped_listeners(Some(mapped_listeners));
+        }
+
+        if !self.upnp_listeners.is_empty() {
+            let upnp_listeners = parse_upnp_listener_urls(&self.upnp_listeners)?;
+            if !upnp_listeners.is_empty() {
+                cfg.set_upnp_listeners(Some(upnp_listeners));
+            }
         }
 
         if let Some(credential_file) = self
@@ -585,6 +618,11 @@ impl NetworkConfigExt for NetworkConfig {
         let mapped_listeners = config.get_mapped_listeners();
         if !mapped_listeners.is_empty() {
             result.mapped_listeners = mapped_listeners.iter().map(|l| l.to_string()).collect();
+        }
+
+        let upnp_listeners = config.get_upnp_listeners().unwrap_or_default();
+        if !upnp_listeners.is_empty() {
+            result.upnp_listeners = upnp_listeners.iter().map(|l| l.to_string()).collect();
         }
 
         result.secure_mode = config.get_secure_mode();

@@ -157,11 +157,11 @@ impl Default for ListenerManagerOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DirectMappedListenerRuntimeConfig {
+pub struct UpnpListenerRuntimeConfig {
     pub urls: Vec<Url>,
 }
 
-impl DirectMappedListenerRuntimeConfig {
+impl UpnpListenerRuntimeConfig {
     pub fn new(urls: Vec<Url>) -> Self {
         Self {
             urls,
@@ -209,7 +209,7 @@ pub struct DirectMappingListennerManager<Accepted, H: ?Sized> {
     registry: Arc<RunningListenerRegistry>,
     events: Arc<dyn CoreEventSink>,
     options: ListenerManagerOptions,
-    direct_mapped_listeners: Option<Vec<url::Url>>,
+    upnp_listeners: Option<Vec<url::Url>>,
     cancel: CancellationToken,
     tasks: Mutex<JoinSet<()>>,
     handler_tasks: Arc<Mutex<JoinSet<()>>>,
@@ -231,7 +231,7 @@ where
         registry: Arc<RunningListenerRegistry>,
         platform: Option<Arc<dyn PortMappingPlatform + 'static>>,
         mapped_listener_manager: Option<Arc<dyn MappedListenerManager + 'static>>,
-        direct_mapped_listeners: Option<Vec<url::Url>>,
+        upnp_listeners: Option<Vec<url::Url>>,
         creator:  Arc<dyn Fn(PortMappingProtocol) -> ListenerCreatorArc<Accepted> + Send + Sync + 'static>,
     ) -> Self {
         let (accepted_tasks, accepted_task_rx) = AcceptedTaskSpawner::new();
@@ -244,7 +244,7 @@ where
             registry,
             events,
             options,
-            direct_mapped_listeners,
+            upnp_listeners,
             operation: Mutex::new(()),
             cancel: CancellationToken::new(),
             tasks: Mutex::new(JoinSet::new()),
@@ -298,11 +298,11 @@ where
         let manager = manager.clone();
         let platform = platform.clone();
         let state = self.state.clone();
-        let Some(direct_mapped_listeners) = &self.direct_mapped_listeners else {
-            tracing::info!("mytracing- no direct_mapped_listener , skipped running ");
+        let Some(upnp_listeners) = &self.upnp_listeners else {
+            tracing::info!("mytracing- no upnp_listener , skipped running ");
             return Ok(());
         };
-        let scheme = direct_mapped_listeners.get(0).map(|url| url.scheme()).unwrap_or("tcp");
+        let scheme = upnp_listeners.get(0).map(|url| url.scheme()).unwrap_or("tcp");
         let protocol = scheme.parse().unwrap();
         match platform.get_router_wan_ip().await {
             Ok(initial_wan_ip) => {

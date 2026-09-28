@@ -169,7 +169,7 @@ impl Default for CoreInstanceStartupPlan {
 pub struct CoreConnectivityConfig {
     pub initial_peers: Vec<Url>,
     pub listeners: Option<ListenerRuntimeConfig>,
-    pub direct_mapped_listeners: Option<Vec<url::Url>>,
+    pub upnp_listeners: Option<Vec<url::Url>>,
     pub runtime: CoreRuntimeConfig,
     #[serde(default, skip_serializing_if = "CoreInstanceStartupPlan::is_default")]
     pub startup_plan: CoreInstanceStartupPlan,
@@ -594,7 +594,7 @@ where
         let CoreConnectivityConfig {
             initial_peers,
             listeners: _,
-            direct_mapped_listeners,
+            upnp_listeners,
             runtime: _,
             startup_plan,
             stun: _,
@@ -650,7 +650,7 @@ where
                 accepted_transport_handler,
                 events.clone(),
                 running_listeners.clone(),
-                direct_mapped_listeners.clone(),
+                upnp_listeners.clone(),
                 port_mapping_platform.clone(),
                 mapped_listener_manager.clone(),
             ))

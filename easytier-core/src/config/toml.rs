@@ -224,8 +224,8 @@ pub trait ConfigLoader: Send + Sync {
     fn get_mapped_listeners(&self) -> Vec<url::Url>;
     fn set_mapped_listeners(&self, listeners: Option<Vec<url::Url>>);
 
-    fn get_direct_mapped_listeners(&self) -> Option<Vec<url::Url>>;
-    fn set_direct_mapped_listeners(&self, listeners: Option<Vec<url::Url>>);
+    fn get_upnp_listeners(&self) -> Option<Vec<url::Url>>;
+    fn set_upnp_listeners(&self, listeners: Option<Vec<url::Url>>);
 
     fn get_vpn_portal_config(&self) -> Option<VpnPortalConfig>;
     fn set_vpn_portal_config(&self, config: VpnPortalConfig);
@@ -460,7 +460,7 @@ struct Config {
     network_identity: Option<NetworkIdentity>,
     listeners: Option<Vec<url::Url>>,
     mapped_listeners: Option<Vec<url::Url>>,
-    direct_mapped_listeners: Option<Vec<url::Url>>,
+    upnp_listeners: Option<Vec<url::Url>>,
 
     exit_nodes: Option<Vec<IpAddr>>,
 
@@ -875,16 +875,16 @@ impl ConfigLoader for TomlConfig {
     fn set_mapped_listeners(&self, listeners: Option<Vec<url::Url>>) {
         self.config.lock().unwrap().mapped_listeners = listeners;
     }
-    fn get_direct_mapped_listeners(&self) -> Option<Vec<url::Url>> {
+    fn get_upnp_listeners(&self) -> Option<Vec<url::Url>> {
         self.config
             .lock()
             .unwrap()
-            .direct_mapped_listeners
+            .upnp_listeners
             .clone()
     }
 
-    fn set_direct_mapped_listeners(&self, listeners: Option<Vec<url::Url>>) {
-        self.config.lock().unwrap().direct_mapped_listeners = listeners;
+    fn set_upnp_listeners(&self, listeners: Option<Vec<url::Url>>) {
+        self.config.lock().unwrap().upnp_listeners = listeners;
     }
 
     fn get_vpn_portal_config(&self) -> Option<VpnPortalConfig> {

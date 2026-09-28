@@ -106,6 +106,11 @@ pub fn network_config_from_toml(config: &TomlConfig) -> NetworkConfig {
         result.mapped_listeners = mapped_listeners.iter().map(ToString::to_string).collect();
     }
 
+    let upnp_listeners = config.get_upnp_listeners().unwrap_or_default();
+    if !upnp_listeners.is_empty() {
+        result.upnp_listeners = upnp_listeners.iter().map(ToString::to_string).collect();
+    }
+
     result.secure_mode = config.get_secure_mode();
     result.credential_file = config
         .get_credential_file()
