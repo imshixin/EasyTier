@@ -237,7 +237,13 @@ fn configure_runtime_core_host_adapters(
                 global_ctx.net_ns.clone(),
             ),
         );
+        adapters.port_mapping_platform = Some(
+            crate::instance::port_mapping_platform::runtime_port_mapping_platform(
+                global_ctx.net_ns.clone(),
+            ),
+        );
     }
+
     #[cfg(feature = "icmp-proxy")]
     {
         adapters.icmp_proxy_host = Some(Arc::new(crate::gateway::icmp_proxy::RuntimeIcmpProxyHost));

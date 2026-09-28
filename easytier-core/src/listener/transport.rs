@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData, net::{SocketAddr}, sync::Arc};
+use std::{fmt, marker::PhantomData, sync::Arc};
 
 use async_trait::async_trait;
 use rand::seq::SliceRandom as _;
@@ -7,14 +7,21 @@ use url::Url;
 
 use crate::{
     connectivity::{
-        hole_punch::port_mapping::{UdpPortMappingPlatform}, manual::resolve_url_addrs, protocol::{
+        manual::resolve_url_addrs, port_mapping::{
+            PortMappingPlatform, PortMappingProtocol
+        }, protocol::{
             ServerProtocolAdmissionController, ServerProtocolUpgrade, ServerProtocolUpgrader, raw,
         },
     }, events::{CoreEvent, CoreEventSink}, host::dns::DnsResolver, listener::{
-        AcceptedSocketHandler, DirectMappingListennerManager, ListenerFactory, ListenerManager, RunningListenerRegistry, plan::ListenerPlanFailure,
+        AcceptedSocketHandler, DirectMappingListennerManager,
+        ListenerFactory, ListenerManager, RunningListenerRegistry,
+        plan::ListenerPlanFailure,
     }, socket::{
-        IpVersion, ListenerConnectionCounter, SocketContext, SocketListener, tcp::{TcpListenOptions, TcpSocketListener, VirtualTcpListener, VirtualTcpListenerFactory}, udp::{
-            UdpBindOptions, UdpSession, UdpSessionAcceptKind, UdpSessionListenRequest, UdpSessionSocket, UdpSessionSocketListener, VirtualUdpSocketFactory,
+        IpVersion, ListenerConnectionCounter, SocketContext, SocketListener,
+        tcp::{TcpListenOptions, TcpSocketListener, VirtualTcpListener, VirtualTcpListenerFactory},
+        udp::{
+            UdpBindOptions, UdpSession, UdpSessionAcceptKind,
+            UdpSessionListenRequest, UdpSessionSocket, UdpSessionSocketListener, VirtualUdpSocketFactory,
         },
     }, tunnel::{Tunnel, ring::RingTunnelRegistry},
 };
@@ -595,7 +602,8 @@ where
         handler: Arc<dyn AcceptedSocketHandler<AcceptedTransport<HostAcceptedTcpSocket<H>>>>,
         events: Arc<dyn CoreEventSink>,
         registry: Arc<RunningListenerRegistry>,
-        platform: Option<Arc<dyn UdpPortMappingPlatform + 'static>>
+        upnp_listeners: Option<Vec<url::Url>>,
+        platform: Option<Arc<dyn PortMappingPlatform + 'static>>,
     ) -> Self {
         let mut manager = ListenerManager::new_with_registry(
             handler.clone(),
@@ -603,7 +611,6 @@ where
             registry.clone(),
             crate::listener::ListenerManagerOptions::default(),
         );
-
         let host1 = host.clone();
         let dns1 = dns.clone();
         let direct_manager = DirectMappingListennerManager::new_with_platform(
@@ -611,28 +618,48 @@ where
             events.clone(),
             registry.clone(),
             platform.clone(),
-            Arc::new(move |local_addr: SocketAddr, wan_url: Url| {
-                tracing::info!(%local_addr, %wan_url, "mytracing-creating listener");
-                let mut bind_options = UdpBindOptions::direct_connect();
-                bind_options.local_addr = Some(local_addr);
-                let options = UdpSessionListenRequest {
-                    bind: bind_options
-                };
-                let kind = UdpSessionAcceptKind::EasyTierMux;
+            upnp_listeners,
+            Arc::new(move |protocol: PortMappingProtocol| {
+                let local_listener: Url = format!("{}://0.0.0.0:0", protocol.name()).parse().unwrap();
+                let local_addr = "0.0.0.0:0".parse().unwrap();
                 let host = host1.clone();
                 let dns = dns1.clone();
+                match protocol {
+                    PortMappingProtocol::Tcp =>{
+                        Arc::new(move || {
+                            let options = TcpListenOptions::direct_connect(local_addr);
 
-                Arc::new(move || {
-                    Box::new(UdpTransportListener::new(
-                        wan_url.clone(),
-                        options.clone(),
-                        kind,
-                        host.clone(),
-                        dns.clone()
-                    ))
-                })
+                            Box::new(TcpTransportListener::new(
+                                local_listener.clone(),
+                                options.clone(),
+                                None,
+                                host.clone(),
+                                dns.clone()
+                            ))
+                        })
+                    },
+                    PortMappingProtocol::Udp =>{
+                        Arc::new(move || {
+                            let mut bind_options = UdpBindOptions::direct_connect();
+                            bind_options.local_addr = Some(local_addr);
+                            let options = UdpSessionListenRequest {
+                                bind: bind_options
+                            };
+                            let kind = UdpSessionAcceptKind::EasyTierMux;
+
+                            Box::new(UdpTransportListener::new(
+                                local_listener.clone(),
+                                options.clone(),
+                                kind,
+                                host.clone(),
+                                dns.clone()
+                            ))
+                        })
+                    },
+                }
             })
         );
+
 
         for config in configs {
             let must_succeed = config.must_succeed();
@@ -720,6 +747,7 @@ where
 
     pub async fn stop(&self) {
         self.manager.stop().await;
+        self.direct_manager.stop().await;
     }
 }
 
@@ -1543,6 +1571,7 @@ mod tests {
             Arc::new(RecordingListenerEvents::default()),
             Arc::new(RunningListenerRegistry::default()),
             None,
+            None,
         );
 
         service.start().await.unwrap();
@@ -1597,7 +1626,8 @@ mod tests {
             Arc::new(|_: AcceptedTransport<MockTcpSocket>| async { Ok(()) }),
             events.clone(),
             Arc::new(RunningListenerRegistry::default()),
-            None
+            None,
+            None,
         );
 
         service.start().await.unwrap();

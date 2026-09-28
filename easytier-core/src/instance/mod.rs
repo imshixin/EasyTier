@@ -38,6 +38,7 @@ use crate::{
     config::peers::{AclRuleConfig, PeerRuntimeSnapshot},
     config::runtime::{CoreInstanceRuntimeConfig, CoreRuntimeConfig, CoreRuntimeConfigStore},
     config::toml::TomlConfig,
+    connectivity::port_mapping::PortMappingPlatform,
     connectivity::hole_punch::port_mapping::UdpPortMappingPlatform,
     connectivity::hole_punch::tcp::TcpHolePunchHost,
     connectivity::stun::{
@@ -167,6 +168,7 @@ impl Default for CoreInstanceStartupPlan {
 pub struct CoreConnectivityConfig {
     pub initial_peers: Vec<Url>,
     pub listeners: Option<ListenerRuntimeConfig>,
+    pub upnp_listeners: Option<Vec<url::Url>>,
     pub runtime: CoreRuntimeConfig,
     #[serde(default, skip_serializing_if = "CoreInstanceStartupPlan::is_default")]
     pub startup_plan: CoreInstanceStartupPlan,
@@ -314,6 +316,7 @@ where
     /// Optional OS port-mapping adapter. STUN-only hole punching remains
     /// available when the host does not provide one.
     pub udp_hole_punch_platform: Option<Arc<dyn UdpPortMappingPlatform>>,
+    pub port_mapping_platform: Option<Arc<dyn PortMappingPlatform>>,
     #[cfg(feature = "proxy-packet")]
     pub icmp_proxy_host: Option<Arc<dyn IcmpProxyHost>>,
     #[cfg(feature = "proxy-cidr-monitor")]
@@ -371,6 +374,7 @@ where
             external_listener_factory: None,
             server_protocol: None,
             udp_hole_punch_platform: None,
+            port_mapping_platform: None,
             #[cfg(feature = "proxy-packet")]
             icmp_proxy_host: None,
             #[cfg(feature = "proxy-cidr-monitor")]
@@ -567,6 +571,7 @@ where
             external_listener_factory,
             server_protocol,
             udp_hole_punch_platform,
+            port_mapping_platform,
             #[cfg(feature = "proxy-packet")]
             icmp_proxy_host,
             #[cfg(feature = "proxy-cidr-monitor")]
@@ -585,6 +590,7 @@ where
         let CoreConnectivityConfig {
             initial_peers,
             listeners: _,
+            upnp_listeners,
             runtime: _,
             startup_plan,
             stun: _,
@@ -640,7 +646,8 @@ where
                 accepted_transport_handler,
                 events.clone(),
                 running_listeners.clone(),
-                udp_hole_punch_platform.clone(),
+                upnp_listeners.clone(),
+                port_mapping_platform.clone(),
             ))
         });
         let protocol = protocol.unwrap_or_else(|| {

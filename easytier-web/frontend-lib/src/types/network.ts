@@ -138,6 +138,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     mtu: null,
     instance_recv_bps_limit: null,
     mapped_listeners: [],
+    upnp_listeners: [],
     enable_magic_dns: false,
     enable_private_mode: false,
     port_forwards: [],
@@ -307,6 +308,7 @@ export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
   normalized.routes ??= []
   normalized.exit_nodes ??= []
   normalized.mapped_listeners ??= []
+  normalized.upnp_listeners ??= []
   normalized.port_forwards ??= []
   normalized.acl = config.acl === undefined ? undefined : normalizeAcl(normalized.acl)
 

@@ -1,6 +1,7 @@
 name: EasyTier Core
 
 on:
+  workflow_dispatch:
   push:
     branches: [ "develop", "main", "releases/**" ]
   pull_request:
@@ -133,7 +134,6 @@ jobs:
       - name: Set current ref as env variable
         run: |
           echo "GIT_DESC=$(git log -1 --format=%cd.%h --date=format:%Y-%m-%d_%H:%M:%S)" >> $GITHUB_ENV
-
       - name: Download web artifact
         uses: actions/download-artifact@v4
         with:
@@ -165,45 +165,43 @@ jobs:
       - uses: taiki-e/install-action@v2
         if: ${{ contains(matrix.OS, 'ubuntu') }}
         with:
-          tool: cargo-zigbuild
+          # v0.23.3 emits -mcpu=generic+v6+strict_align for
+          # arm-unknown-linux-musleabi, which zig 0.16.0 rejects;
+          # unpin only together with a zig bump.
+          tool: cargo-zigbuild@0.23.2
 
       - name: Build
         if: ${{ !contains(matrix.TARGET, 'mips') }}
-        run: |          
+        run: |
           if [[ "$TARGET" == *windows* ]]; then
             SUFFIX=.exe
           else
             SUFFIX=""
           fi
-
           if [[ "$TARGET" =~ (x86_64-unknown-linux-musl|aarch64-unknown-linux-musl|windows|darwin) ]]; then
             BUILD=build
           else
             BUILD=zigbuild
           fi
-
           if [[ "$TARGET" =~ ^(riscv64|loongarch64|aarch64).*$ || "$TARGET" =~ (freebsd|windows) ]]; then
             FEATURES="mimalloc"
           else
             FEATURES="jemalloc"
           fi
-          
+
           cargo $BUILD --release --target $TARGET --package=easytier-web --features=embed
           mv ./target/$TARGET/release/easytier-web"$SUFFIX" ./target/$TARGET/release/easytier-web-embed"$SUFFIX"
-          
-          cargo $BUILD --release --target $TARGET --features=$FEATURES
 
+          cargo $BUILD --release --target $TARGET --features=$FEATURES
       - name: Build (MIPS)
         if: ${{ contains(matrix.TARGET, 'mips') }}
         env:
           RUSTC_BOOTSTRAP: 1
         run: |
           cargo build -r --target $TARGET -Z build-std=std,panic_abort --package=easytier --features=jemalloc
-
       - name: Compress
         run: |
           mkdir -p ./artifacts/objects/
-
           # windows is the only OS using a different convention for executable file name
           if [[ $OS =~ ^windows.*$ ]]; then
               SUFFIX=.exe
@@ -216,13 +214,12 @@ jobs:
                   find "easytier/third_party/${ARCH_DIR}" -maxdepth 1 -type f \( -name "*.dll" -o -name "*.sys" \) -exec cp {} ./artifacts/objects/ \;
               fi
           fi
-
           if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
             TAG=$GITHUB_REF_NAME
           else
             TAG=$GITHUB_SHA
           fi
-          
+
           if [[ $OS =~ ^ubuntu.*$ && ! $TARGET =~ (loongarch|freebsd) ]]; then
             HOST_ARCH=$(uname -m)
             case $HOST_ARCH in
@@ -230,33 +227,67 @@ jobs:
               aarch64) UPX_ARCH="arm64" ;;
               *)       UPX_ARCH="amd64" ;;
             esac
-
             UPX_VERSION=4.2.4
             UPX_PKG="upx-${UPX_VERSION}-${UPX_ARCH}_linux"
             curl -L "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/${UPX_PKG}.tar.xz" -s | tar xJvf -
             cp "${UPX_PKG}/upx" .
             UPX_BIN=./upx
           fi
-
           for BIN in ./target/$TARGET/release/easytier-{core,cli,web,web-embed}"$SUFFIX"; do
             if [[ -f "$BIN" ]]; then
               if [[ -n "$UPX_BIN" ]]; then
                 $UPX_BIN --lzma --best "$BIN" || true
               fi
-
               mv "$BIN" ./artifacts/objects/
             fi
           done
-
           mv ./artifacts/objects/* ./artifacts/
           rm -rf ./artifacts/objects/
-
       - name: Archive artifact
         uses: actions/upload-artifact@v5
         with:
           name: easytier-${{ matrix.ARTIFACT_NAME }}
           path: |
             ./artifacts/*
+      - name: Prepare SignPath test artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && contains(matrix.TARGET, 'windows') }}
+        run: |
+          mkdir -p ./signpath-artifacts
+          cp \
+            ./artifacts/easytier-core.exe \
+            ./artifacts/easytier-cli.exe \
+            ./artifacts/easytier-web.exe \
+            ./artifacts/easytier-web-embed.exe \
+            ./signpath-artifacts/
+      - name: Upload unsigned SignPath test artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && contains(matrix.TARGET, 'windows') }}
+        id: signpath-upload
+        uses: actions/upload-artifact@v5
+        with:
+          name: signpath-unsigned-${{ matrix.ARTIFACT_NAME }}
+          path: ./signpath-artifacts/*
+          if-no-files-found: error
+
+      - name: Submit SignPath test-signing request
+        if: ${{ github.event_name == 'workflow_dispatch' && contains(matrix.TARGET, 'windows') }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: 368cf38d-86d5-4bfe-a1fa-82a50dce7e9f
+          project-slug: EasyTier
+          signing-policy-slug: test-signing
+          artifact-configuration-slug: initial
+          github-artifact-id: ${{ steps.signpath-upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ./signpath-signed-artifacts
+
+      - name: Upload signed SignPath test artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && contains(matrix.TARGET, 'windows') }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: signpath-signed-${{ matrix.ARTIFACT_NAME }}
+          path: ./signpath-signed-artifacts/*
+          if-no-files-found: error
 
   build_magisk:
     runs-on: ubuntu-latest
@@ -280,7 +311,6 @@ jobs:
           cp ./downloaded-binaries/easytier-core ./easytier-contrib/easytier-magisk/
           cp ./downloaded-binaries/easytier-cli ./easytier-contrib/easytier-magisk/
           cp ./downloaded-binaries/easytier-web ./easytier-contrib/easytier-magisk/
-
       # 上传生成的模块
       - name: Upload Magisk Module
         uses: actions/upload-artifact@v5

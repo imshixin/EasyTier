@@ -43,6 +43,12 @@ const protos: { [proto: string]: number } = {
   srv: 0,
 }
 
+// UPnP 端口映射（NAT-PMP）只支持 tcp/udp
+const upnpProtos: { [proto: string]: number } = {
+  tcp: 11010,
+  udp: 11010,
+}
+
 const inetSuggestions = ref([''])
 
 function searchInetSuggestions(e: { query: string }) {
@@ -323,6 +329,17 @@ const instanceRecvBpsLimitInput = computed<string>({
                   <label for="listener_urls">{{ t('listener_urls') }}</label>
                   <UrlListInput v-model="curNetwork.listener_urls" :protos="protos" :add-label="t('add_listener_url')"
                     placeholder="0.0.0.0" />
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap w-full">
+                <div class="flex flex-col gap-2 grow p-fluid">
+                  <div class="flex">
+                    <label for="upnp_listeners">{{ t('upnp_listeners') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t('upnp_listeners_help')"></span>
+                  </div>
+                  <UrlListInput v-model="curNetwork.upnp_listeners" :protos="upnpProtos" :port-min="0"
+                    :add-label="t('add_upnp_listener')" default-url="tcp://0.0.0.0:0" />
                 </div>
               </div>
 

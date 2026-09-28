@@ -7,6 +7,8 @@ const props = defineProps<{
     addLabel: string
     placeholder?: string
     defaultUrl?: string
+    portMin?: number
+    portMax?: number
 }>()
 
 const list = defineModel<string[]>({ required: true })
@@ -23,7 +25,8 @@ const removeUrl = (index: number) => {
 <template>
     <div class="flex flex-col gap-y-2 w-full">
         <div v-for="(_, index) in list" :key="index" class="flex gap-2 items-center w-full">
-            <UrlInput v-model="list[index]" :protos="protos" :placeholder="placeholder">
+            <UrlInput v-model="list[index]" :protos="protos" :placeholder="placeholder" :port-min="portMin"
+                :port-max="portMax">
                 <template #actions>
                     <Button icon="pi pi-trash" severity="danger" text rounded @click="removeUrl(index)" />
                 </template>
