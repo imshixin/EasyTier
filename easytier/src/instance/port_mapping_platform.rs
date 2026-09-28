@@ -10,7 +10,6 @@ use easytier_core::connectivity::port_mapping::{
     ActivePortMapping, PortMappingAttemptError, PortMappingBackend,
     PortMappingLifecycle, PortMappingPlatform, PortMappingProtocol
 };
-// use crate::instance::mapped_listener_manager::;
 use crate::common::{netns::NetNS, upnp};
 
 struct RuntimePortMappingPlatform {

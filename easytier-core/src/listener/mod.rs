@@ -168,14 +168,6 @@ impl UpnpListenerRuntimeConfig {
         }
     }
 }
-
-#[async_trait]
-pub trait MappedListenerManager: Send + Sync + 'static {
-    async fn get_mapped_listeners(&self) -> Vec<Url>;
-    async fn add_mapped_listeners(&self, new_listener: &Url);
-    async fn remove_mapped_listeners(&self, old_listener: &Url);
-}
-
 struct DirectMappingListenerState {
     wan_url: Url,
     _mapping_lease: Box<dyn PortMappingLease>,
@@ -205,7 +197,6 @@ impl DirectMappingListenerState{
 pub struct DirectMappingListennerManager<Accepted, H: ?Sized> {
     handler: Arc<H>,
     platform: Option<Arc<dyn PortMappingPlatform + 'static>>,
-    mapped_listener_manager: Option<Arc<dyn MappedListenerManager + 'static>>,
     registry: Arc<RunningListenerRegistry>,
     events: Arc<dyn CoreEventSink>,
     options: ListenerManagerOptions,
@@ -230,7 +221,6 @@ where
         events: Arc<dyn CoreEventSink>,
         registry: Arc<RunningListenerRegistry>,
         platform: Option<Arc<dyn PortMappingPlatform + 'static>>,
-        mapped_listener_manager: Option<Arc<dyn MappedListenerManager + 'static>>,
         upnp_listeners: Option<Vec<url::Url>>,
         creator:  Arc<dyn Fn(PortMappingProtocol) -> ListenerCreatorArc<Accepted> + Send + Sync + 'static>,
     ) -> Self {
@@ -240,7 +230,6 @@ where
         Self {
             handler,
             platform,
-            mapped_listener_manager,
             registry,
             events,
             options,
@@ -259,10 +248,6 @@ where
     async fn run(&self) -> anyhow::Result<()>{
         let Some(platform) = &self.platform else {
             tracing::info!("mytracing- platform is none, disabled direct connect via upnp port mapping");
-            return Ok(());
-        };
-        let Some(manager) = &self.mapped_listener_manager else {
-            tracing::info!("mytracing- mapped_listener_manager is none, disabled direct connect via upnp port mapping");
             return Ok(());
         };
         let _operation = self.operation.lock().await;
@@ -295,7 +280,6 @@ where
         let registry = self.registry.clone();
         let options = self.options.clone();
         let accepted_tasks = self.accepted_tasks.clone();
-        let manager = manager.clone();
         let platform = platform.clone();
         let state = self.state.clone();
         let Some(upnp_listeners) = &self.upnp_listeners else {
@@ -320,9 +304,6 @@ where
                 ).await;
                 match initial_state {
                     Ok(state) => {
-                        manager.add_mapped_listeners(&state.wan_url).await;
-                        let listeners = manager.get_mapped_listeners().await;
-                        tracing::info!(mapped_listeners = ?listeners, "mytracing- added new mapped listener");
                         let mut state_val = self.state.lock().await;
                         state_val.replace(state);
                     },
@@ -370,14 +351,12 @@ where
                     accepted_tasks.clone(),
                     creator.clone(),
                 ).await.context("new wan ip establish_listener_state")?;
-                let new_url = new_state.wan_url.clone();
+                let new_wan_url = new_state.wan_url.clone();
                 let new_local_listener = new_state._mapping_lease.local_url();
-                tracing::info!(new_wan_url = ?new_url, ?new_local_listener, "updatign new direct mapping listener state");
+                tracing::info!(new_wan_url = ?new_wan_url, ?new_local_listener, "updatign new direct mapping listener state");
                 if let Some(_old_state) = state.replace(new_state) {
                     _old_state.lease_cancel.cancel();
-                    manager.remove_mapped_listeners(&_old_state.wan_url).await;
                 }
-                manager.add_mapped_listeners(&new_url).await;
             }
             Ok(())
         };
@@ -408,9 +387,6 @@ where
         let mut state = self.state.lock().await;
         if let Some(state) = state.take() {
             state.lease_cancel.cancel();
-            if let Some(manager) = &self.mapped_listener_manager{
-                manager.remove_mapped_listeners(&state.wan_url).await;
-            };
         }
         let _operation = self.operation.lock().await;
         let mut tasks = self.tasks.lock().await;

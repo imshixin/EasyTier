@@ -14,7 +14,7 @@ use crate::{
         },
     }, events::{CoreEvent, CoreEventSink}, host::dns::DnsResolver, listener::{
         AcceptedSocketHandler, DirectMappingListennerManager,
-        ListenerFactory, ListenerManager, MappedListenerManager, RunningListenerRegistry,
+        ListenerFactory, ListenerManager, RunningListenerRegistry,
         plan::ListenerPlanFailure,
     }, socket::{
         IpVersion, ListenerConnectionCounter, SocketContext, SocketListener,
@@ -604,7 +604,6 @@ where
         registry: Arc<RunningListenerRegistry>,
         upnp_listeners: Option<Vec<url::Url>>,
         platform: Option<Arc<dyn PortMappingPlatform + 'static>>,
-        mapped_listener_manager: Option<Arc<dyn MappedListenerManager + 'static>>,
     ) -> Self {
         let mut manager = ListenerManager::new_with_registry(
             handler.clone(),
@@ -619,7 +618,6 @@ where
             events.clone(),
             registry.clone(),
             platform.clone(),
-            mapped_listener_manager,
             upnp_listeners,
             Arc::new(move |protocol: PortMappingProtocol| {
                 let local_listener: Url = format!("{}://0.0.0.0:0", protocol.name()).parse().unwrap();
@@ -1574,7 +1572,6 @@ mod tests {
             Arc::new(RunningListenerRegistry::default()),
             None,
             None,
-            None,
         );
 
         service.start().await.unwrap();
@@ -1629,7 +1626,6 @@ mod tests {
             Arc::new(|_: AcceptedTransport<MockTcpSocket>| async { Ok(()) }),
             events.clone(),
             Arc::new(RunningListenerRegistry::default()),
-            None,
             None,
             None,
         );

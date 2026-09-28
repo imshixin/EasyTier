@@ -73,7 +73,6 @@ use crate::{
             AcceptedTransport, CoreListenerRuntime, HostAcceptedTcpSocket,
             ProtocolAcceptedTransportHandler,
         },
-        MappedListenerManager
     },
     peers::peer_center::instance::PeerCenterInstance,
     peers::{
@@ -318,7 +317,6 @@ where
     /// available when the host does not provide one.
     pub udp_hole_punch_platform: Option<Arc<dyn UdpPortMappingPlatform>>,
     pub port_mapping_platform: Option<Arc<dyn PortMappingPlatform>>,
-    pub mapped_listener_manager: Option<Arc<dyn MappedListenerManager>>,
     #[cfg(feature = "proxy-packet")]
     pub icmp_proxy_host: Option<Arc<dyn IcmpProxyHost>>,
     #[cfg(feature = "proxy-cidr-monitor")]
@@ -377,7 +375,6 @@ where
             server_protocol: None,
             udp_hole_punch_platform: None,
             port_mapping_platform: None,
-            mapped_listener_manager: None,
             #[cfg(feature = "proxy-packet")]
             icmp_proxy_host: None,
             #[cfg(feature = "proxy-cidr-monitor")]
@@ -575,7 +572,6 @@ where
             server_protocol,
             udp_hole_punch_platform,
             port_mapping_platform,
-            mapped_listener_manager,
             #[cfg(feature = "proxy-packet")]
             icmp_proxy_host,
             #[cfg(feature = "proxy-cidr-monitor")]
@@ -652,7 +648,6 @@ where
                 running_listeners.clone(),
                 upnp_listeners.clone(),
                 port_mapping_platform.clone(),
-                mapped_listener_manager.clone(),
             ))
         });
         let protocol = protocol.unwrap_or_else(|| {
