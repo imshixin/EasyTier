@@ -1,11 +1,14 @@
 use std::{
-    fmt, future::Future, net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4}, pin::Pin, sync::Arc, time::Duration,
+    fmt, future::Future, net::{IpAddr, Ipv4Addr, SocketAddr}, pin::Pin, sync::Arc, time::Duration,
 };
 
 use async_trait::async_trait;
 use tokio::sync::oneshot;
 
 use crate::events::{CoreEvent, CoreEventSink};
+use crate::connectivity::port_mapping::{
+    PortMappingBackend, PortMappingAttemptError, PortMappingAttemptPhase
+};
 
 const UPNP_RENEW_INTERVAL: Duration = Duration::from_secs(240);
 
@@ -119,34 +122,6 @@ struct ManagedUdpPortMappingLease {
     gateway_external_port: u16,
     stop_tx: Option<oneshot::Sender<()>>,
 }
-pub(crate) struct ManagedDirectUdpPortMappingLease {
-    backend: UdpPortMappingBackend,
-    wan_ip: Ipv4Addr,
-    gateway_external_port: u16,
-    stop_tx: Option<oneshot::Sender<()>>,
-}
-
-impl ManagedDirectUdpPortMappingLease {
-    pub fn get_wan_addr(&self) -> SocketAddr{
-        SocketAddr::V4(SocketAddrV4::new(self.wan_ip, self.gateway_external_port))
-    }
-}
-
-impl fmt::Debug for ManagedDirectUdpPortMappingLease {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("UdpPortMappingLease")
-            .field("backend", &self.backend.name())
-            .field("gateway_external_port", &self.gateway_external_port)
-            .finish()
-    }
-}
-impl Drop for ManagedDirectUdpPortMappingLease {
-    fn drop(&mut self) {
-        if let Some(stop_tx) = self.stop_tx.take() {
-            let _ = stop_tx.send(());
-        }
-    }
-}
 
 impl fmt::Debug for ManagedUdpPortMappingLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -219,47 +194,6 @@ pub(crate) async fn start_udp_port_mapping(
         gateway_external_port,
         stop_tx: Some(stop_tx),
     })))
-}
-
-pub(crate) async fn start_direct_udp_port_mapping(
-    platform: Arc<dyn UdpPortMappingPlatform>,
-    local_listener: &url::Url,
-) -> anyhow::Result<Option<ManagedDirectUdpPortMappingLease>> {
-    if !should_map_udp_listener(local_listener) {
-        return Ok(None);
-    }
-
-    let mapping = discover_udp_port_mapping(platform.as_ref(), local_listener).await?;
-    let backend = mapping.backend();
-    let IpAddr::V4(wan_ip) = platform.get_router_wan_ip().await? else {
-        anyhow::bail!("router wan ip is not ipv4");
-    };
-    let gateway_external_port = mapping.gateway_external_port();
-    tracing::info!(
-        %local_listener,
-        backend = backend.name(),
-        local_addr = %mapping.local_addr(),
-        gateway_external_port,
-        %wan_ip,
-        "directconnect udp port mapping established"
-    );
-
-    let (stop_tx, stop_rx) = oneshot::channel();
-    platform.spawn_udp_port_mapping_lifecycle(
-        local_listener.clone(),
-        Box::pin(run_udp_port_mapping_lifecycle(
-            local_listener.clone(),
-            mapping,
-            stop_rx,
-        )),
-    );
-
-    Ok(Some(ManagedDirectUdpPortMappingLease {
-        backend,
-        wan_ip,
-        gateway_external_port,
-        stop_tx: Some(stop_tx),
-    }))
 }
 
 async fn discover_udp_port_mapping(
@@ -379,6 +313,20 @@ fn udp_url(addr: SocketAddr) -> url::Url {
     url.set_port(Some(addr.port()))
         .expect("UDP URL should accept a port");
     url
+}
+
+pub fn udp_port_mapping_backend(backend: &UdpPortMappingBackend) -> PortMappingBackend{
+    match backend {
+        UdpPortMappingBackend::Igd => PortMappingBackend::Igd,
+        UdpPortMappingBackend::NatPmp => PortMappingBackend::NatPmp,
+    }
+}
+pub fn udp_port_mapping_err(err: PortMappingAttemptError) -> UdpPortMappingAttemptError{
+    let phase = match err.phase() {
+        PortMappingAttemptPhase::Discovery => UdpPortMappingAttemptPhase::Discovery,
+        PortMappingAttemptPhase::Establishment => UdpPortMappingAttemptPhase::Establishment,
+    };
+    UdpPortMappingAttemptError { phase, source: err.into() }
 }
 
 #[cfg(test)]

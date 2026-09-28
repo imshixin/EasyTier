@@ -254,7 +254,7 @@ pub(crate) async fn establish_port_mapping(
 
 pub(crate) async fn get_router_wan_ip(
     net_ns: NetNS,
-) -> anyhow::Result<IpAddr> {
+) -> anyhow::Result<Ipv4Addr> {
     match get_router_wan_ip_igd(&net_ns).await {
         Ok(wan_ip) => return Ok(wan_ip),
         Err(_err) => {
@@ -272,7 +272,7 @@ pub(crate) async fn get_router_wan_ip(
 
 async fn get_router_wan_ip_igd(
     net_ns: &NetNS,
-) -> anyhow::Result<IpAddr> {
+) -> anyhow::Result<Ipv4Addr> {
     let local_listener  = "udp://0.0.0.0:11010".parse::<url::Url>().expect("static url should be valid");
     let (gateway, _) =
         discover_igd_gateway_in_netns(net_ns.clone(), local_listener.clone())
@@ -281,15 +281,22 @@ async fn get_router_wan_ip_igd(
     gateway.get_external_ip()
     .await
     .with_context(|| {
-                format!(
-                    "get_router_wan_ip by igd method failed"
-                )
-            })
+        format!(
+            "get_router_wan_ip by igd method failed"
+        )
+    })
+    .and_then(|ip|  {
+        match ip {
+            IpAddr::V4(ipv4) => Ok(ipv4),
+            IpAddr::V6(_) => anyhow::bail!(""),
+        }
+    })
+
 }
 
 async fn get_router_wan_ip_natpmp(
     net_ns: &NetNS,
-) -> anyhow::Result<IpAddr> {
+) -> anyhow::Result<Ipv4Addr> {
     let local_listener  = "udp://0.0.0.0:11010".parse::<url::Url>().unwrap();
     let (gateway, _) =
         discover_nat_pmp_gateway_in_netns(net_ns.clone(), local_listener.clone())
@@ -311,18 +318,18 @@ async fn get_router_wan_ip_natpmp(
         .await
         .with_context(|| {
             format!(
-                "wait nat-pmp udp mapping response gateway={gateway}"
+                "get router wan ip response gateway={gateway}"
             )
         })?
         .map_err(anyhow::Error::from)
         .with_context(|| {
             format!(
-                "read nat-pmp udp mapping response gateway={gateway}"
+                "get router wan ip gateway={gateway}"
             )
         })?;
 
     match response {
-        NatPmpResponse::Gateway(r) => Ok(IpAddr::V4(r.public_address().clone())),
+        NatPmpResponse::Gateway(r) => Ok(r.public_address().clone()),
         _ => bail!("Natpmp response invalid: {response:?}")
     }
 }

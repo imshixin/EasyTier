@@ -237,6 +237,11 @@ fn configure_runtime_core_host_adapters(
                 global_ctx.net_ns.clone(),
             ),
         );
+        adapters.port_mapping_platform = Some(
+            crate::instance::port_mapping_platform::runtime_port_mapping_platform(
+                global_ctx.net_ns.clone(),
+            ),
+        );
         adapters.mapped_listener_manager = Some(
             crate::instance::mapped_listener_manager::runtime_mapped_listener_manager(
                 global_ctx.clone()

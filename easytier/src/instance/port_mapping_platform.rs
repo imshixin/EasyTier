@@ -3,7 +3,7 @@
 //! Peer selection, signaling, RPC registration, socket/session ownership and
 //! lifecycle live in `easytier-core`. Native only supplies OS port mapping.
 
-use std::{net::IpAddr, sync::Arc};
+use std::{net::Ipv4Addr, sync::Arc};
 
 use async_trait::async_trait;
 use easytier_core::connectivity::port_mapping::{
@@ -37,7 +37,7 @@ impl PortMappingPlatform for RuntimePortMappingPlatform {
     }
     async fn get_router_wan_ip(
         &self,
-    ) -> Result<IpAddr, anyhow::Error> {
+    ) -> Result<Ipv4Addr, anyhow::Error> {
         upnp::get_router_wan_ip(self.net_ns.clone()).await
     }
 }

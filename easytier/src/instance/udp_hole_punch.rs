@@ -80,7 +80,7 @@ impl UdpPortMappingPlatform for RuntimeUdpHolePunchPlatform {
     async fn get_router_wan_ip(
         &self,
     ) -> Result<IpAddr, anyhow::Error> {
-        upnp::get_router_wan_ip(self.net_ns.clone()).await
+        anyhow::bail!("unimplemented");
     }
 }
 

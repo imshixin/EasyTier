@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc};
 
 use async_trait::async_trait;
 use crate::common::global_ctx::ArcGlobalCtx;
@@ -6,7 +6,7 @@ use easytier_core::listener::MappedListenerManager;
 use crate::common::config::ConfigLoader;
 
 pub struct CoreMappedListenerManager {
-    global_ctx: ArcGlobalCtx
+    global_ctx: ArcGlobalCtx,
 }
 
 #[async_trait]
@@ -38,5 +38,5 @@ impl MappedListenerManager for CoreMappedListenerManager {
     }
 }
 pub(crate) fn runtime_mapped_listener_manager(global_ctx: ArcGlobalCtx) -> Arc<dyn MappedListenerManager> {
-    Arc::new(CoreMappedListenerManager { global_ctx })
+    Arc::new(CoreMappedListenerManager { global_ctx})
 }

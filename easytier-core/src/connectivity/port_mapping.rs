@@ -1,21 +1,23 @@
 use std::{
-    fmt, future::Future, net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4}, pin::Pin, sync::Arc, time::Duration,
+    fmt, future::Future, net::{Ipv4Addr, SocketAddr}, pin::Pin, str::FromStr, sync::Arc, time::Duration,
 };
 
 use async_trait::async_trait;
 use tokio::sync::oneshot;
 
-use crate::{connectivity::hole_punch::port_mapping::{UdpPortMappingAttemptError, UdpPortMappingAttemptPhase, UdpPortMappingBackend}, events::{CoreEvent, CoreEventSink}};
+use crate::{events::{CoreEvent, CoreEventSink}};
 
 const UPNP_RENEW_INTERVAL: Duration = Duration::from_secs(240);
 
 pub(crate) trait PortMappingLease: Send + Sync + fmt::Debug {
     fn public_addr_resolved(&self, _mapped_addr: SocketAddr) {}
-}
+    fn external_port(&self) -> u16 {
+        0
+    }
 
-pub(crate) trait PortMappingInfo: Send + Sync + fmt::Debug {
-    fn get_external_addr(&self) -> SocketAddrV4;
-    fn get_local_addr(&self) -> SocketAddrV4;
+    fn local_url(&self) -> url::Url {
+        url::Url::parse("udp://0.0.0.0:0").expect("static url is invalid")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,32 @@ pub enum PortMappingAttemptPhase {
 pub enum PortMappingProtocol {
     Tcp,
     Udp,
+}
+
+impl FromStr for PortMappingProtocol{
+    type Err=();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "tcp" => Ok(Self::Tcp),
+            "udp" => Ok(Self::Udp),
+            _ => Err(())
+        }
+    }
+}
+
+impl PortMappingProtocol {
+    pub fn name(&self) -> &'static str {
+        match self {
+            PortMappingProtocol::Tcp => "tcp",
+            PortMappingProtocol::Udp => "udp",
+        }
+    }
+    pub fn as_str(&self)-> &'static str {
+        match self {
+            PortMappingProtocol::Tcp => "tcp",
+            PortMappingProtocol::Udp => "udp",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -123,13 +151,13 @@ pub trait PortMappingPlatform: Send + Sync + 'static {
 
     async fn get_router_wan_ip(
         &self
-    ) -> Result<IpAddr, anyhow::Error>;
+    ) -> Result<Ipv4Addr, anyhow::Error>;
 }
 
 pub(crate) struct ManagedPortMappingLease {
     events: Arc<dyn CoreEventSink>,
     local_listener: url::Url,
-    protocal: PortMappingProtocol,
+    protocol: PortMappingProtocol,
     backend: PortMappingBackend,
     gateway_external_port: u16,
     stop_tx: Option<oneshot::Sender<()>>,
@@ -139,6 +167,7 @@ impl fmt::Debug for ManagedPortMappingLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DirectPortMappingLease")
             .field("backend", &self.backend.name())
+            .field("protocol", &self.protocol.name())
             .field("gateway_external_port", &self.gateway_external_port)
             .finish()
     }
@@ -156,16 +185,23 @@ impl PortMappingLease for ManagedPortMappingLease {
     fn public_addr_resolved(&self, mapped_addr: SocketAddr) {
         self.events.emit(CoreEvent::UdpPortMappingEstablished {
             local_listener: self.local_listener.clone(),
-            mapped_listener: udp_url(mapped_addr),
+            mapped_listener: _udp_url(mapped_addr),
             backend: self.backend.name().to_owned(),
         });
         tracing::info!(
             local_listener = %self.local_listener,
             backend = self.backend.name(),
+            protocol = self.protocol.name(),
             gateway_external_port = self.gateway_external_port,
             stun_mapped_addr = %mapped_addr,
-            "udp public addr resolved after port mapping"
+            "public addr resolved after port mapping"
         );
+    }
+    fn external_port(&self) -> u16 {
+        self.gateway_external_port
+    }
+    fn local_url(&self) -> url::Url {
+        self.local_listener.clone()
     }
 }
 
@@ -176,6 +212,7 @@ pub(crate) async fn start_port_mapping(
     local_listener: &url::Url,
 ) -> anyhow::Result<Option<Box<dyn PortMappingLease>>> {
     if !should_map_listener(local_listener) {
+        tracing::info!("!should_map_listener is true");
         return Ok(None);
     }
 
@@ -205,7 +242,7 @@ pub(crate) async fn start_port_mapping(
         events,
         local_listener: local_listener.clone(),
         backend,
-        protocal,
+        protocol: protocal,
         gateway_external_port,
         stop_tx: Some(stop_tx),
     })))
@@ -216,6 +253,7 @@ async fn discover_port_mapping(
     protocal: PortMappingProtocol,
     local_listener: &url::Url,
 ) -> anyhow::Result<Box<dyn ActivePortMapping>> {
+    tracing::info!("mytracing- start discover_port_mapping");
     let igd_error = match platform
         .establish_port_mapping(PortMappingBackend::Igd, protocal, local_listener)
         .await
@@ -303,7 +341,7 @@ async fn run_port_mapping_lifecycle(
 }
 
 pub(crate) fn should_map_listener(local_listener: &url::Url) -> bool {
-    if local_listener.scheme() != "udp" || local_listener.scheme() != "tcp" {
+    if local_listener.scheme() != "udp" && local_listener.scheme() != "tcp" {
         return false;
     }
 
@@ -322,7 +360,7 @@ fn listener_ipv4_host(local_listener: &url::Url) -> Option<Ipv4Addr> {
     local_listener.host_str()?.parse().ok()
 }
 
-fn udp_url(addr: SocketAddr) -> url::Url {
+fn _udp_url(addr: SocketAddr) -> url::Url {
     let mut url = url::Url::parse("udp://0.0.0.0").expect("static UDP URL should be valid");
     url.set_ip_host(addr.ip())
         .expect("socket IP should be a valid URL host");
@@ -331,7 +369,7 @@ fn udp_url(addr: SocketAddr) -> url::Url {
     url
 }
 
-fn tcp_url(addr: SocketAddr) -> url::Url {
+fn _tcp_url(addr: SocketAddr) -> url::Url {
     let mut url = url::Url::parse("tcp://0.0.0.0").expect("static TCP URL should be valid");
     url.set_ip_host(addr.ip())
         .expect("socket IP should be a valid URL host");

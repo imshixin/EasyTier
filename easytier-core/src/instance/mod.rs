@@ -38,6 +38,7 @@ use crate::{
     config::peers::{AclRuleConfig, PeerRuntimeSnapshot},
     config::runtime::{CoreInstanceRuntimeConfig, CoreRuntimeConfig, CoreRuntimeConfigStore},
     config::toml::TomlConfig,
+    connectivity::port_mapping::PortMappingPlatform,
     connectivity::hole_punch::port_mapping::UdpPortMappingPlatform,
     connectivity::hole_punch::tcp::TcpHolePunchHost,
     connectivity::stun::{
@@ -72,7 +73,7 @@ use crate::{
             AcceptedTransport, CoreListenerRuntime, HostAcceptedTcpSocket,
             ProtocolAcceptedTransportHandler,
         },
-        MappedListenerManager,
+        MappedListenerManager
     },
     peers::peer_center::instance::PeerCenterInstance,
     peers::{
@@ -168,6 +169,7 @@ impl Default for CoreInstanceStartupPlan {
 pub struct CoreConnectivityConfig {
     pub initial_peers: Vec<Url>,
     pub listeners: Option<ListenerRuntimeConfig>,
+    pub direct_mapped_listeners: Option<Vec<url::Url>>,
     pub runtime: CoreRuntimeConfig,
     #[serde(default, skip_serializing_if = "CoreInstanceStartupPlan::is_default")]
     pub startup_plan: CoreInstanceStartupPlan,
@@ -315,6 +317,7 @@ where
     /// Optional OS port-mapping adapter. STUN-only hole punching remains
     /// available when the host does not provide one.
     pub udp_hole_punch_platform: Option<Arc<dyn UdpPortMappingPlatform>>,
+    pub port_mapping_platform: Option<Arc<dyn PortMappingPlatform>>,
     pub mapped_listener_manager: Option<Arc<dyn MappedListenerManager>>,
     #[cfg(feature = "proxy-packet")]
     pub icmp_proxy_host: Option<Arc<dyn IcmpProxyHost>>,
@@ -373,6 +376,7 @@ where
             external_listener_factory: None,
             server_protocol: None,
             udp_hole_punch_platform: None,
+            port_mapping_platform: None,
             mapped_listener_manager: None,
             #[cfg(feature = "proxy-packet")]
             icmp_proxy_host: None,
@@ -570,6 +574,7 @@ where
             external_listener_factory,
             server_protocol,
             udp_hole_punch_platform,
+            port_mapping_platform,
             mapped_listener_manager,
             #[cfg(feature = "proxy-packet")]
             icmp_proxy_host,
@@ -589,6 +594,7 @@ where
         let CoreConnectivityConfig {
             initial_peers,
             listeners: _,
+            direct_mapped_listeners,
             runtime: _,
             startup_plan,
             stun: _,
@@ -644,7 +650,8 @@ where
                 accepted_transport_handler,
                 events.clone(),
                 running_listeners.clone(),
-                udp_hole_punch_platform.clone(),
+                direct_mapped_listeners.clone(),
+                port_mapping_platform.clone(),
                 mapped_listener_manager.clone(),
             ))
         });
