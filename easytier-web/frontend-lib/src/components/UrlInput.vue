@@ -5,10 +5,15 @@ import InputGroupAddon from 'primevue/inputgroupaddon'
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
     placeholder?: string
     protos: { [proto: string]: number }
-}>()
+    portMin?: number
+    portMax?: number
+}>(), {
+    portMin: 1,
+    portMax: 65535,
+})
 
 const { t } = useI18n()
 const url = defineModel<string>({ required: true })
@@ -163,7 +168,7 @@ const onProtoChange = (newProto: string) => {
                 <InputGroupAddon>
                     <span style="font-weight: bold">:</span>
                 </InputGroupAddon>
-                <InputNumber v-model="internalValue.port" :format="false" :min="1" :max="65535" class="max-w-24"
+                <InputNumber v-model="internalValue.port" :format="false" :min="portMin" :max="portMax" class="max-w-24"
                     :placeholder="String(protos[internalValue.proto] ?? 11010)" fluid />
             </template>
             <!-- Rendered in both responsive branches; keep action slot content free of side effects and duplicate IDs. -->
@@ -194,7 +199,7 @@ const onProtoChange = (newProto: string) => {
                 </div>
                 <div v-if="!isNoPortProto" class="flex flex-col gap-2">
                     <label>{{ t('port') }}</label>
-                    <InputNumber v-model="internalValue.port" :format="false" :min="1" :max="65535" class="w-full"
+                    <InputNumber v-model="internalValue.port" :format="false" :min="portMin" :max="portMax" class="w-full"
                         :placeholder="String(protos[internalValue.proto] ?? 11010)" />
                 </div>
             </div>

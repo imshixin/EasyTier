@@ -268,7 +268,7 @@ impl CoreInstanceConfig {
             flags.enable_ipv6,
             socket_context.clone(),
         ));
-        let direct_mapped_listeners = config.get_direct_mapped_listeners();
+        let upnp_listeners = config.get_upnp_listeners();
         let socks5_bind = (!host.ignore_unsupported_config || host.gateway_enabled)
             .then(|| config.get_socks5_portal())
             .flatten()
@@ -332,7 +332,7 @@ impl CoreInstanceConfig {
             connectivity: CoreConnectivityConfig {
                 initial_peers: peers.into_iter().map(|peer| peer.uri).collect(),
                 listeners,
-                direct_mapped_listeners,
+                upnp_listeners,
                 runtime,
                 startup_plan: super::CoreInstanceStartupPlan {
                     gateway: host.gateway_enabled,

@@ -36,6 +36,7 @@ add_new_network: 添加新网络
 add_peer_url: 添加节点
 add_initial_node: 添加初始节点
 add_listener_url: 添加监听地址
+add_upnp_listener: 添加UPnP监听
 add_mapped_listener: 添加监听映射
 del_cur_network: 删除当前网络
 select_network: 选择网络
@@ -198,7 +199,7 @@ socks5_help: |
 
 exit_nodes: 出口节点列表
 exit_nodes_help: 转发所有流量的出口节点，虚拟IPv4地址，优先级由列表顺序决定
-  
+
 port_forwards: 端口转发
 port_forwards_help: "将本地端口转发到虚拟网络中的远程端口。例如：udp://0.0.0.0:12345/10.126.126.1:23456，表示将本地UDP端口12345转发到虚拟网络中的10.126.126.1:23456。可以指定多个。"
 port_forwards_bind_addr: "绑定地址，如：0.0.0.0"
@@ -216,6 +217,11 @@ instance_recv_bps_limit_help: |
   限制当前实例整体入站流量的总接收速率，单位为字节每秒。
   留空表示不限速。
 instance_recv_bps_limit_placeholder: 留空表示不限速
+
+upnp_listeners: UPnP监听
+upnp_listeners_help: |
+  需要通过 UPnP/NAT-PMP 映射的监听器地址，默认留空，仅支持 tcp/udp。
+  例如：tcp://0.0.0.0:0，端口为 0 时系统自动分配，目前只可以添加一个。
 
 mapped_listeners: 监听映射
 mapped_listeners_help: |
@@ -292,7 +298,7 @@ web:
     confirm_password: 确认密码
     submit: 注册
     login: 返回登录
-  
+
   main:
     dashboard: 仪表盘
     device_list: 设备列表
