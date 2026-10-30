@@ -4,6 +4,7 @@ import { defineComponent, h, nextTick, reactive } from 'vue'
 import Config from '../src/components/Config.vue'
 import {
   DEFAULT_NETWORK_CONFIG,
+  normalizeNetworkConfig,
   toBackendNetworkConfig,
   type NetworkConfig,
 } from '../src/types/network'
@@ -43,7 +44,6 @@ const CONFIG_CHECKBOX_FIELDS = [
 ] as const satisfies readonly (readonly [keyof NetworkConfig, string])[]
 
 const CONFIG_TOGGLE_FIELDS = [
-  'enable_vpn_portal',
   'enable_relay_network_whitelist',
   'enable_manual_routes',
   'enable_socks5',
@@ -212,6 +212,26 @@ const AutoCompleteStub = defineComponent({
   },
 })
 
+const MultiSelectStub = defineComponent({
+  name: 'MultiSelect',
+  props: {
+    modelValue: Array,
+    inputId: String,
+    appendTo: String,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.inputId,
+      'data-append-to': props.appendTo,
+      value: (props.modelValue ?? []).join(','),
+      'data-stub': 'multi-select',
+      onInput: (event: Event) => emit('update:modelValue', splitList((event.target as HTMLInputElement).value)),
+    })
+  },
+})
+
 const UrlListInputStub = defineComponent({
   name: 'UrlListInput',
   props: {
@@ -307,9 +327,15 @@ function makeConfig(): NetworkConfig {
     no_tun: true,
     hostname: 'host-a',
     proxy_cidrs: ['10.10.0.0/16', '172.16.1.0/24'],
-    enable_vpn_portal: true,
-    vpn_portal_client_network_addr: '10.144.0.0',
-    vpn_portal_listen_port: 22023,
+    vpn_portal_config: {
+      wireguard_listen: '0.0.0.0:22023',
+      wireguard_private_key: 'portal-private-key',
+      clients: [{
+        name: 'phone-a',
+        virtual_ip: '10.1.2.10/24',
+        groups: ['ops'],
+      }],
+    },
     listener_urls: ['tcp://0.0.0.0:12010'],
     dev_name: 'tun-test',
     mtu: 1280,
@@ -354,6 +380,7 @@ function mountConfig(config: NetworkConfig = makeConfig()) {
         InputGroupAddon: PassThrough,
         InputNumber: InputNumberStub,
         InputText: InputTextStub,
+        MultiSelect: MultiSelectStub,
         Panel: PanelStub,
         Password: PasswordStub,
         SelectButton: SelectButtonStub,
@@ -392,7 +419,7 @@ describe('Config.vue network config projection', () => {
 
     expect(input(wrapper, '#hostname').value).toBe('host-a')
     expect(input(wrapper, '#subnet-proxy').value).toBe('10.10.0.0/16,172.16.1.0/24')
-    expect(input(wrapper, 'input[placeholder="vpn_portal_client_network"]').value).toBe('10.144.0.0')
+    expect(input(wrapper, '#vpn_portal_wireguard_listen').value).toBe('0.0.0.0:22023')
     expect(input(wrapper, '#dev_name').value).toBe('tun-test')
     expect(input(wrapper, '#mtu').value).toBe('1280')
     expect(input(wrapper, '#instance_recv_bps_limit').value).toBe('9007199254740993')
@@ -422,7 +449,7 @@ describe('Config.vue network config projection', () => {
     await wrapper.find('#disable_ipv6').setValue(false)
     await setInput(wrapper, '#hostname', 'host-edited')
     await setInput(wrapper, '#subnet-proxy', '10.7.0.0/16,172.17.0.0/16')
-    await setInput(wrapper, 'input[placeholder="vpn_portal_client_network"]', '10.200.0.0')
+    await setInput(wrapper, '#vpn_portal_wireguard_listen', '[::]:23000')
     await setInput(wrapper, 'input[data-add-label="add_listener_url"]', 'tcp://0.0.0.0:13010')
     await setInput(wrapper, '#dev_name', 'tun-edited')
     await setInput(wrapper, '#mtu', '1260')
@@ -450,7 +477,15 @@ describe('Config.vue network config projection', () => {
       disable_ipv6: false,
       hostname: 'host-edited',
       proxy_cidrs: ['10.7.0.0/16', '172.17.0.0/16'],
-      vpn_portal_client_network_addr: '10.200.0.0',
+      vpn_portal_config: {
+        wireguard_listen: '[::]:23000',
+        wireguard_private_key: 'portal-private-key',
+        clients: [{
+          name: 'phone-a',
+          virtual_ip: '10.1.2.10/24',
+          groups: ['ops'],
+        }],
+      },
       listener_urls: ['tcp://0.0.0.0:13010'],
       dev_name: 'tun-edited',
       mtu: 1260,
@@ -478,6 +513,15 @@ describe('Config.vue network config projection', () => {
       listener_urls: ['tcp://0.0.0.0:13010'],
       mtu: 1260,
       instance_recv_bps_limit: '9007199254740993',
+      vpn_portal_config: {
+        wireguard_listen: '[::]:23000',
+        wireguard_private_key: 'portal-private-key',
+        clients: [{
+          name: 'phone-a',
+          virtual_ip: '10.1.2.10/24',
+          groups: ['ops'],
+        }],
+      },
       port_forwards: [{
         proto: 'tcp',
         bind_ip: '127.0.0.1',
@@ -512,9 +556,10 @@ describe('Config.vue network config projection', () => {
     expect(toggleButtons).toHaveLength(CONFIG_TOGGLE_FIELDS.length)
     for (const [index, field] of CONFIG_TOGGLE_FIELDS.entries()) {
       const value = originalFlagValues.get(field)
-      expect(toggleButtons[index].attributes('aria-pressed'), `${field} should project into UI`)
+      const toggle = toggleButtons[index]
+      expect(toggle.attributes('aria-pressed'), `${field} should project into UI`)
         .toBe(String(value))
-      await toggleButtons[index].trigger('click')
+      await toggle.trigger('click')
       await nextTick()
     }
 
@@ -524,6 +569,45 @@ describe('Config.vue network config projection', () => {
       expect(curNetwork[field], `${field} should update config`).toBe(expectedValue)
       expect(backend[field], `${field} should be preserved in backend JSON`).toBe(expectedValue)
     }
+  })
+
+  it('generates a private key on enable and preserves devices across disable and reload', async () => {
+    const { curNetwork, wrapper } = mountConfig(DEFAULT_NETWORK_CONFIG())
+    await nextTick()
+    expect(input(wrapper, '#vpn_portal_enabled').checked).toBe(false)
+
+    await wrapper.find('#vpn_portal_enabled').setValue(true)
+    const key = curNetwork.vpn_portal_config!.wireguard_private_key!
+    expect(atob(key)).toHaveLength(32)
+    expect(curNetwork.vpn_portal_config!.wireguard_listen).toBe('0.0.0.0:22022')
+    expect(wrapper.find('#vpn_portal_wireguard_private_key').exists()).toBe(false)
+    expect(wrapper.find('#vpn_portal_client_name_0').exists()).toBe(false)
+    curNetwork.vpn_portal_config!.clients.push({ name: 'phone', virtual_ip: '10.0.0.2/24', groups: [] })
+
+    await wrapper.find('#vpn_portal_enabled').setValue(false)
+    expect(curNetwork.vpn_portal_config!.enabled).toBe(false)
+    const restored = normalizeNetworkConfig(toBackendNetworkConfig(curNetwork))
+    const reloaded = mountConfig(restored)
+    await nextTick()
+    expect(input(reloaded.wrapper, '#vpn_portal_enabled').checked).toBe(false)
+    await reloaded.wrapper.find('#vpn_portal_enabled').setValue(true)
+    expect(reloaded.curNetwork.vpn_portal_config).toMatchObject({
+      enabled: true,
+      wireguard_private_key: key,
+      clients: [{ name: 'phone', virtual_ip: '10.0.0.2/24' }],
+    })
+  })
+
+  it('preserves existing keys and completes older enabled configurations without one', async () => {
+    const original = makeConfig()
+    const existing = mountConfig(original)
+    await nextTick()
+    expect(existing.curNetwork.vpn_portal_config!.wireguard_private_key).toBe('portal-private-key')
+    const incomplete = makeConfig()
+    delete incomplete.vpn_portal_config!.wireguard_private_key
+    const generated = mountConfig(incomplete)
+    await nextTick()
+    expect(atob(generated.curNetwork.vpn_portal_config!.wireguard_private_key!)).toHaveLength(32)
   })
 
   it('keeps uint64 input editable without losing large values', async () => {

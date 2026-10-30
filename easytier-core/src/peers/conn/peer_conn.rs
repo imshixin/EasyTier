@@ -34,9 +34,9 @@ use super::{
     peer_session::{PeerSession, PeerSessionAction},
 };
 use crate::peers::{
-    PacketRecvChan,
+    PacketRecvChan, PeerConnectionOrigin, PeerPacketIngress,
     context::{ArcPeerContext, NetworkIdentity, NetworkSecretDigest},
-    send_packet_to_chan,
+    send_peer_packet_to_chan,
     traffic_metrics::data_packet_payload_len,
 };
 use crate::{
@@ -272,6 +272,7 @@ impl PeerConnCloseNotify {
 
 pub struct PeerConn {
     conn_id: PeerConnId,
+    origin: PeerConnectionOrigin,
 
     my_peer_id: PeerId,
     peer_id_hint: Option<PeerId>,
@@ -291,9 +292,6 @@ pub struct PeerConn {
 
     info: Option<HandshakeRequest>,
     is_client: Option<bool>,
-
-    // remote or local
-    is_hole_punched: bool,
 
     close_event_notifier: Arc<PeerConnCloseNotify>,
 
@@ -319,21 +317,30 @@ impl Debug for PeerConn {
 }
 
 impl PeerConn {
+    #[cfg(test)]
     pub(crate) fn new(
         my_peer_id: PeerId,
         context: ArcPeerContext,
         tunnel: Box<dyn Tunnel>,
         peer_session_store: Arc<PeerSessionStore>,
     ) -> Self {
-        Self::new_with_peer_id_hint(my_peer_id, context, tunnel, None, peer_session_store)
+        Self::new_with_peer_id_hint_and_origin(
+            my_peer_id,
+            context,
+            tunnel,
+            None,
+            peer_session_store,
+            PeerConnectionOrigin::Manual,
+        )
     }
 
-    pub(crate) fn new_with_peer_id_hint(
+    pub(crate) fn new_with_peer_id_hint_and_origin(
         my_peer_id: PeerId,
         context: ArcPeerContext,
         tunnel: Box<dyn Tunnel>,
         peer_id_hint: Option<PeerId>,
         peer_session_store: Arc<PeerSessionStore>,
+        origin: PeerConnectionOrigin,
     ) -> Self {
         let flags = context.flags();
         let tunnel_info = tunnel.info();
@@ -363,6 +370,7 @@ impl PeerConn {
 
         PeerConn {
             conn_id,
+            origin,
 
             my_peer_id,
             peer_id_hint,
@@ -384,8 +392,6 @@ impl PeerConn {
 
             info: None,
             is_client: None,
-
-            is_hole_punched: true,
 
             close_event_notifier: Arc::new(PeerConnCloseNotify::new(conn_id)),
 
@@ -428,12 +434,27 @@ impl PeerConn {
         self.conn_id
     }
 
-    pub fn set_is_hole_punched(&mut self, is_hole_punched: bool) {
-        self.is_hole_punched = is_hole_punched;
+    pub(crate) fn is_attached(&self) -> bool {
+        self.origin == PeerConnectionOrigin::Attached
     }
 
     pub fn is_hole_punched(&self) -> bool {
-        self.is_hole_punched
+        matches!(
+            self.origin,
+            PeerConnectionOrigin::TcpHolePunch | PeerConnectionOrigin::UdpHolePunch
+        )
+    }
+
+    fn max_ping_interval(&self) -> Duration {
+        match self.origin {
+            // TCP hole-punched connections need frequent traffic to stay alive.
+            PeerConnectionOrigin::TcpHolePunch => Duration::from_secs(1),
+            PeerConnectionOrigin::Manual
+            | PeerConnectionOrigin::Direct
+            | PeerConnectionOrigin::Listener
+            | PeerConnectionOrigin::UdpHolePunch
+            | PeerConnectionOrigin::Attached => Duration::from_secs(32),
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -672,7 +693,8 @@ impl PeerConn {
     /// | Client role | Server role | Typical credential condition | Client auth level | Server auth level | Client sees server type | Server sees client type |
     /// | --- | --- | --- | --- | --- | --- | --- |
     /// | Admin | Admin | same network_secret, proof verified | NetworkSecretConfirmed | NetworkSecretConfirmed | Admin | Admin |
-    /// | Credential | Admin | client pubkey is trusted by admin | EncryptedUnauthenticated | PeerVerified | Admin | Credential |
+    /// | Credential | Admin | admin key is pinned and client key is trusted | PeerVerified | PeerVerified | Admin | Credential |
+    /// | Credential | Admin | client pubkey is trusted, admin key is not pinned | EncryptedUnauthenticated | PeerVerified | Admin | Credential |
     /// | Credential | Admin | client pubkey is unknown | handshake may fail | handshake reject | unknown | unknown |
     /// | Admin | SharedNode | pinned key match | PeerVerified | EncryptedUnauthenticated | SharedNode | Admin |
     /// | Admin | SharedNode | local has no pinned key requirement | EncryptedUnauthenticated | EncryptedUnauthenticated | SharedNode | Admin |
@@ -681,8 +703,7 @@ impl PeerConn {
     ///
     /// Logic (in priority order):
     /// 1. **NetworkSecretConfirmed**: proof verification succeeds
-    /// 2. **PeerVerified**: pinned_pubkey matches and is in trusted list
-    ///    (if no network_secret, pinned_pubkey must be in trusted list)
+    /// 2. **PeerVerified**: pinned_pubkey matches
     /// 3. **PeerVerified**: pubkey is in trusted list
     /// 4. **EncryptedUnauthenticated**: initiator without network_secret
     /// 5. **Reject**: none of the above
@@ -710,16 +731,6 @@ impl PeerConn {
             if pinned != remote_pubkey {
                 return Err(Error::WaitRespError(
                     "pinned remote static pubkey mismatch".to_owned(),
-                ));
-            }
-            // If no network_secret, pinned key must be in trusted list
-            if !has_network_secret
-                && !self
-                    .context
-                    .is_pubkey_trusted(remote_pubkey, remote_network_name)
-            {
-                return Err(Error::WaitRespError(
-                    "pinned pubkey not in trusted list".to_owned(),
                 ));
             }
             return Ok(SecureAuthLevel::PeerVerified);
@@ -1286,6 +1297,11 @@ impl PeerConn {
         let ctrl_sender = self.ctrl_resp_sender.clone();
         let conn_info_for_instrument = self.get_conn_info();
         let context = self.context.clone();
+        let ingress = PeerPacketIngress::Peer {
+            peer_id: self.get_peer_id(),
+            conn_id: self.conn_id,
+            origin: self.origin,
+        };
         let control_network_name = conn_info_for_instrument.network_name.clone();
 
         let is_foreign_network =
@@ -1307,7 +1323,12 @@ impl PeerConn {
 
                     let mut zc_packet = ret.unwrap();
                     let buf_len = zc_packet.buf_len() as u64;
-                    let limited_payload_len = data_packet_payload_len(&zc_packet);
+                    if let Some(payload_len) = data_packet_payload_len(&zc_packet)
+                        && let Some(limiter) = recv_limiter.as_ref()
+                        && !limiter.try_consume(payload_len)
+                    {
+                        continue;
+                    }
                     let Some(peer_mgr_hdr) = zc_packet.mut_peer_manager_header() else {
                         tracing::error!(
                             "unexpected packet: {:?}, cannot decode peer manager hdr",
@@ -1329,14 +1350,11 @@ impl PeerConn {
                         if let Err(e) = ctrl_sender.send(zc_packet) {
                             tracing::error!(?e, "peer conn send ctrl resp error");
                         }
-                    } else if send_packet_to_chan(&sender, zc_packet).await.is_err() {
-                        break;
-                    }
-
-                    if let Some(payload_len) = limited_payload_len
-                        && let Some(limiter) = recv_limiter.as_ref()
+                    } else if send_peer_packet_to_chan(&sender, zc_packet, ingress)
+                        .await
+                        .is_err()
                     {
-                        limiter.consume(payload_len).await;
+                        break;
                     }
                 }
 
@@ -1365,6 +1383,7 @@ impl PeerConn {
             self.context.clone(),
             self.get_conn_info().network_name,
             self.liveness.clone(),
+            self.max_ping_interval(),
         );
 
         let close_event_notifier = self.close_event_notifier.clone();
@@ -1512,5 +1531,42 @@ impl Drop for PeerConn {
     fn drop(&mut self) {
         // if someone drop a conn manually, the notifier is not called.
         self.close_event_notifier.notify_close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{peers::test_support::NoopPeerContext, tunnel::ring::create_ring_tunnel_pair};
+
+    #[tokio::test]
+    async fn connection_origin_determines_hole_punch_and_ping_policy() {
+        for (origin, is_hole_punched, max_interval) in [
+            (PeerConnectionOrigin::Manual, false, 32),
+            (PeerConnectionOrigin::Direct, false, 32),
+            (PeerConnectionOrigin::Listener, false, 32),
+            (PeerConnectionOrigin::TcpHolePunch, true, 1),
+            (PeerConnectionOrigin::UdpHolePunch, true, 32),
+            (PeerConnectionOrigin::Attached, false, 32),
+        ] {
+            // Admission determines the policy even when the transport is a ring.
+            let (tunnel, _remote_tunnel) = create_ring_tunnel_pair();
+            let conn = PeerConn::new_with_peer_id_hint_and_origin(
+                1,
+                Arc::new(NoopPeerContext::default()),
+                tunnel,
+                None,
+                Arc::new(PeerSessionStore::new()),
+                origin,
+            );
+
+            assert_eq!(conn.is_hole_punched(), is_hole_punched, "{origin:?}");
+            assert_eq!(
+                conn.max_ping_interval(),
+                Duration::from_secs(max_interval),
+                "{origin:?}",
+            );
+            assert_eq!(conn.is_attached(), origin == PeerConnectionOrigin::Attached);
+        }
     }
 }

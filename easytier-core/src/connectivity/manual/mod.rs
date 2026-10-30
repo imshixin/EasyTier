@@ -26,7 +26,7 @@ use crate::{
     },
     events::{CoreEvent, CoreEventSink},
     host::dns::{DnsQuery, DnsResolver},
-    peers::peer_manager::PeerManagerCore,
+    peers::{PeerConnectionOrigin, peer_manager::PeerManagerCore},
     proto::common::TunnelInfo,
     socket::{
         IpVersion, SocketContext,
@@ -47,7 +47,8 @@ fn is_manual_endpoint_scheme(scheme: &str) -> bool {
     matches!(scheme, "http" | "https" | "txt" | "srv")
 }
 
-fn validate_manual_url(url: &Url) -> anyhow::Result<()> {
+/// Checks supported connector and discovery schemes without resolving the URL.
+pub fn validate_manual_url(url: &Url) -> anyhow::Result<()> {
     if ManualTransport::from_url(url).is_ok() || is_manual_endpoint_scheme(url.scheme()) {
         Ok(())
     } else {
@@ -94,6 +95,14 @@ pub struct ManualInterfaceAddrs {
 
 #[async_trait]
 pub trait ManualConnectorHost: VirtualTcpSocketFactory + VirtualUdpSocketFactory {
+    fn supports_external_tunnel(&self, _scheme: &str) -> bool {
+        false
+    }
+
+    async fn connect_external_tunnel(&self, _url: &Url) -> anyhow::Result<Option<Box<dyn Tunnel>>> {
+        Ok(None)
+    }
+
     async fn local_addr_for_remote(
         &self,
         remote_addr: SocketAddr,
@@ -108,6 +117,13 @@ pub trait ManualConnectorHost: VirtualTcpSocketFactory + VirtualUdpSocketFactory
     ) -> anyhow::Result<ConnectedByteStream<<Self as VirtualTcpSocketFactory>::Socket>> {
         anyhow::bail!("host does not support external byte stream: {url}")
     }
+}
+
+#[async_trait]
+pub trait ExternalTunnelConnector: Send + Sync + 'static {
+    fn supports_scheme(&self, scheme: &str) -> bool;
+
+    async fn connect(&self, url: &Url) -> anyhow::Result<Box<dyn Tunnel>>;
 }
 
 #[async_trait]
@@ -175,6 +191,14 @@ where
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("ring registry is not configured"))?;
             let tunnel = connect_ring_tunnel(registry, &endpoint.url)?;
+            return Ok(apply_resolved_endpoint_info(
+                tunnel,
+                requested_url,
+                endpoint.tunnel_prefixes,
+            ));
+        }
+
+        if let Some(tunnel) = self.host.connect_external_tunnel(&endpoint.url).await? {
             return Ok(apply_resolved_endpoint_info(
                 tunnel,
                 requested_url,
@@ -710,17 +734,20 @@ where
             return Err(error);
         }
     };
-    let ip_versions = match resolve_reconnect_ip_versions(
-        &normalized_url,
-        connect_timeout,
-        ManualTransport::from_url(&normalized_url)
-            .ok()
-            .map(|transport| data.options.socket_context(transport, IpVersion::Both))
-            .unwrap_or_default(),
-        data.dns.as_ref(),
-    )
-    .await
-    {
+    let ip_versions = match if data.host.supports_external_tunnel(normalized_url.scheme()) {
+        Ok(vec![IpVersion::Both])
+    } else {
+        resolve_reconnect_ip_versions(
+            &normalized_url,
+            connect_timeout,
+            ManualTransport::from_url(&normalized_url)
+                .ok()
+                .map(|transport| data.options.socket_context(transport, IpVersion::Both))
+                .unwrap_or_default(),
+            data.dns.as_ref(),
+        )
+        .await
+    } {
         Ok(ip_versions) => ip_versions,
         Err(error) => {
             emit_connect_error(&data, &url, IpVersion::Both, &error);
@@ -770,13 +797,17 @@ where
         ),
     )
     .await?;
-    if endpoint.url.scheme() != "ring" && !data.protocol.supports_scheme(endpoint.url.scheme()) {
+    let uses_external_tunnel = data.host.supports_external_tunnel(endpoint.url.scheme());
+    if endpoint.url.scheme() != "ring"
+        && !uses_external_tunnel
+        && !data.protocol.supports_scheme(endpoint.url.scheme())
+    {
         anyhow::bail!(
             "unsupported client protocol upgrader: {}",
             endpoint.url.scheme()
         );
     }
-    let transport = (endpoint.url.scheme() != "ring")
+    let transport = (endpoint.url.scheme() != "ring" && !uses_external_tunnel)
         .then(|| ManualTransport::from_url(&endpoint.url))
         .transpose()?;
     let resolved = match transport {
@@ -822,6 +853,15 @@ where
         if endpoint.url.scheme() == "ring" {
             return connect_ring_tunnel(&data.ring_registry, &endpoint.url);
         }
+        if uses_external_tunnel {
+            return data
+                .host
+                .connect_external_tunnel(&endpoint.url)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("host did not provide external tunnel for {}", endpoint.url)
+                });
+        }
         let transport = transport.expect("non-Ring endpoint should have a transport");
         let connected = match resolved {
             Some((remote_addr, bind_addrs)) => {
@@ -851,7 +891,7 @@ where
     let (peer_id, conn_id) =
         with_timeout_budget("handshake", started_at, connect_timeout, async move {
             peer_manager
-                .add_client_tunnel_with_peer_id_hint(tunnel, true, None)
+                .add_client_tunnel_with_peer_id_hint(tunnel, PeerConnectionOrigin::Manual, None)
                 .await
                 .map_err(anyhow::Error::from)
         })
