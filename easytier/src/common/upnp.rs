@@ -9,27 +9,24 @@ use easytier_core::connectivity::{hole_punch::port_mapping::UdpPortMappingLifecy
     PortMappingBackend as CorePortMappingBackend, PortMappingLifecycle,
     PortMappingProtocol as CorePortMappingProtocol
 }};
-use igd_next::{
-    AddAnyPortError, PortMappingProtocol as IgdPortMappingProtocol, SearchOptions,
-    aio::{
-        Gateway,
-        tokio::{Tokio, search_gateway},
-    },
-};
+// use igd_next::{
+//     AddAnyPortError, PortMappingProtocol as IgdPortMappingProtocol, SearchOptions,
+
+// };
 use natpmp::{
-    Protocol as NatPmpMappingProtocol, Response as NatPmpResponse, new_tokio_natpmp, new_tokio_natpmp_with,
-    Protocol as NatPmpProtocol, Response as NatPmpResponse, get_default_gateway,
+    Protocol as NatPmpMappingProtocol, Response as NatPmpResponse, new_tokio_natpmp_with,
+    get_default_gateway,
     new_natpmp_async_with,
-};
-use easytier_core::connectivity::hole_punch::port_mapping::{
-    ActiveUdpPortMapping as CoreActiveUdpPortMapping, UdpPortMappingAttemptError,
-    UdpPortMappingBackend, UdpPortMappingLifecycle,
 };
 // use natpmp::{
 use tokio::net::UdpSocket;
 
 use crate::igd_next::{
-    AddAnyPortError, Gateway, PortMappingProtocol, SearchOptions, search_gateway,
+    AddAnyPortError, Gateway, PortMappingProtocol as IgdPortMappingProtocol, SearchOptions, search_gateway,
+    // aio::{
+    //     Gateway,
+    //     tokio::{Tokio, search_gateway},
+    // },
 };
 
 use super::netns::NetNS;
@@ -62,7 +59,7 @@ async fn new_protected_natpmp(
 
 enum PortMappingBackend {
     NatPmp { gateway: Ipv4Addr, protocol: NatPmpMappingProtocol },
-    Igd { gateway: TokioGateway, protocol: IgdPortMappingProtocol },
+    Igd { gateway: Gateway, protocol: IgdPortMappingProtocol },
 }
 
 struct ActivePortMapping {
@@ -94,8 +91,8 @@ impl ActivePortMapping {
     fn core_protocol(&self) -> CorePortMappingProtocol {
         match self.backend {
             PortMappingBackend::Igd { gateway: _, protocol } => match protocol {
-                IgdPortMappingProtocol::TCP => CorePortMappingProtocol::Tcp,
-                IgdPortMappingProtocol::UDP => CorePortMappingProtocol::Udp,
+                IgdPortMappingProtocol::Tcp => CorePortMappingProtocol::Tcp,
+                IgdPortMappingProtocol::Udp => CorePortMappingProtocol::Udp,
             },
             PortMappingBackend::NatPmp { gateway: _, protocol } => match protocol {
                 NatPmpMappingProtocol::TCP => CorePortMappingProtocol::Tcp,
@@ -156,7 +153,7 @@ impl ActivePortMapping {
 
     async fn establish_via_igd(
         local_listener: &url::Url,
-        gateway: TokioGateway,
+        gateway: Gateway,
         protocol: IgdPortMappingProtocol,
         local_addr: SocketAddr,
     ) -> anyhow::Result<Self> {
@@ -441,7 +438,7 @@ async fn discover_igd_gateway_in_netns(
 async fn establish_igd_mapping_in_netns(
     net_ns: NetNS,
     local_listener: url::Url,
-    gateway: TokioGateway,
+    gateway: Gateway,
     protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
 ) -> anyhow::Result<ActivePortMapping> {
@@ -522,7 +519,7 @@ fn should_run_port_mapping_in_dedicated_thread(net_ns: &NetNS) -> bool {
 }
 
 async fn add_mapping_port_igd(
-    gateway: &TokioGateway,
+    gateway: &Gateway,
     protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
     local_listener: &url::Url,
@@ -713,7 +710,7 @@ async fn resolve_internal_addr(
 }
 
 async fn renew_mapping_igd(
-    gateway: &TokioGateway,
+    gateway: &Gateway,
     protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
     external_port: u16,
@@ -732,7 +729,7 @@ async fn renew_mapping_igd(
 }
 
 async fn remove_mapping_igd(
-    gateway: &TokioGateway,
+    gateway: &Gateway,
     protocol: IgdPortMappingProtocol,
     external_port: u16,
     local_listener: &url::Url,
@@ -745,8 +742,8 @@ async fn remove_mapping_igd(
 
 fn igd_protocol(protocol: &CorePortMappingProtocol) -> IgdPortMappingProtocol{
     match protocol {
-        CorePortMappingProtocol::Tcp => IgdPortMappingProtocol::TCP,
-        CorePortMappingProtocol::Udp => IgdPortMappingProtocol::UDP,
+        CorePortMappingProtocol::Tcp => IgdPortMappingProtocol::Tcp,
+        CorePortMappingProtocol::Udp => IgdPortMappingProtocol::Udp,
     }
 }
 
