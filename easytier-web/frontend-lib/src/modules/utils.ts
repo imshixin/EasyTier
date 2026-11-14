@@ -62,14 +62,35 @@ export function UuidToStr(uuid: UUID | null | undefined): string {
     return uint32ToUuid(uuid.part1 ?? 0, uuid.part2 ?? 0, uuid.part3 ?? 0, uuid.part4 ?? 0);
 }
 
+export function StrToUuid(uuid: string): UUID {
+    const hex = uuid.replace(/-/g, '');
+    if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
+        throw new Error(`Invalid UUID: ${uuid}`);
+    }
+
+    return {
+        part1: Number.parseInt(hex.slice(0, 8), 16),
+        part2: Number.parseInt(hex.slice(8, 16), 16),
+        part3: Number.parseInt(hex.slice(16, 24), 16),
+        part4: Number.parseInt(hex.slice(24, 32), 16),
+    };
+}
+
 export interface Location {
     country: string | undefined;
     city: string | undefined;
     region: string | undefined;
 }
 
+export interface DeviceNetwork {
+    network_id: string;
+    display_name: string;
+    network_name: string;
+}
+
 export interface DeviceInfo {
     hostname: string;
+    alias?: string;
     public_ip: string;
     running_network_count: number;
     report_time: string;
@@ -77,12 +98,16 @@ export interface DeviceInfo {
     running_network_instances?: Array<string>;
     machine_id: string;
     location: Location | undefined;
+    networks?: Array<DeviceNetwork>;
+    online?: boolean;
+    last_seen?: string;
 }
 
 export function buildDeviceInfo(device: any): DeviceInfo {
     const runningInstances = device.info?.running_network_instances ?? [];
     let dev_info: DeviceInfo = {
         hostname: device.info?.hostname,
+        alias: device.alias || undefined,
         public_ip: device.client_url,
         running_network_instances: runningInstances.map((instance: any) => UuidToStr(instance)),
         running_network_count: runningInstances.length,
@@ -90,6 +115,9 @@ export function buildDeviceInfo(device: any): DeviceInfo {
         easytier_version: device.info?.easytier_version,
         machine_id: UuidToStr(device.info?.machine_id),
         location: device.location,
+        networks: device.networks ?? [],
+        online: device.online ?? false,
+        last_seen: device.last_seen,
     };
 
     return dev_info;

@@ -6,20 +6,49 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use crate::foundation::time::{Duration, timeout};
 
 use crate::{
+    foundation::token_bucket::{ArcByteLimiter, ByteLimiter},
     packet::{PacketType, ZCPacket},
     peers::{
+        PeerConnectionOrigin, PeerPacketIngress,
         conn::{
             peer_conn::{PeerConn, PeerConnId},
             peer_map::PeerMap,
             peer_session::PeerSessionStore,
         },
-        context::NetworkIdentity,
+        context::{NetworkIdentity, PeerContext},
         create_packet_recv_chan,
         error::Error,
+        recv_packet_envelope_from_chan,
         test_support::NoopPeerContext,
     },
     tunnel::ring::create_ring_tunnel_pair,
 };
+
+struct RejectingRecvLimiter;
+
+impl ByteLimiter for RejectingRecvLimiter {
+    fn try_consume(&self, _bytes: u64) -> bool {
+        false
+    }
+}
+
+struct LimitedPeerContext {
+    limiter: ArcByteLimiter,
+}
+
+impl PeerContext for LimitedPeerContext {
+    fn network_identity(&self) -> NetworkIdentity {
+        NetworkIdentity::default()
+    }
+
+    fn recv_limiter(
+        &self,
+        _network_name: &str,
+        _is_foreign_network: bool,
+    ) -> Option<ArcByteLimiter> {
+        Some(self.limiter.clone())
+    }
+}
 
 impl PeerConn {
     #[tracing::instrument]
@@ -49,6 +78,56 @@ async fn peer_conn_handshake_over_memory_tunnel() {
     assert_eq!(server.get_peer_id(), 1);
     assert_eq!(client.get_conn_info().features, ["liveness-echo-v1"]);
     assert_eq!(server.get_conn_info().features, ["liveness-echo-v1"]);
+}
+
+#[tokio::test]
+async fn peer_recv_limit_drops_excess_data_without_blocking_ping() {
+    let peer_session_store = Arc::new(PeerSessionStore::new());
+    let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
+    let client_ctx = Arc::new(NoopPeerContext::default());
+    let server_ctx = Arc::new(LimitedPeerContext {
+        limiter: Arc::new(RejectingRecvLimiter),
+    });
+
+    let mut client = PeerConn::new(1, client_ctx, client_tunnel, peer_session_store.clone());
+    let mut server = PeerConn::new(2, server_ctx, server_tunnel, peer_session_store);
+
+    let (client_ret, server_ret) = tokio::join!(
+        client.do_handshake_as_client(),
+        server.do_handshake_as_server()
+    );
+    client_ret.unwrap();
+    server_ret.unwrap();
+
+    let (client_tx, _client_rx) = create_packet_recv_chan();
+    let (server_tx, mut server_rx) = create_packet_recv_chan();
+    client.start_recv_loop(client_tx).await;
+    server.start_recv_loop(server_tx).await;
+
+    let client_rx_packets = client.get_stats().rx_packets;
+
+    let mut data = ZCPacket::new_with_payload(b"over limit");
+    data.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+    client.send_msg(data).await.unwrap();
+
+    let mut ping = ZCPacket::new_with_payload(&[]);
+    ping.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
+    client.send_msg(ping).await.unwrap();
+
+    timeout(Duration::from_secs(1), async {
+        while client.get_stats().rx_packets == client_rx_packets {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("receive limiting must not block the following pong");
+
+    assert!(
+        timeout(Duration::from_millis(50), server_rx.recv())
+            .await
+            .is_err(),
+        "over-limit data packet should be dropped"
+    );
 }
 
 #[tokio::test]
@@ -125,6 +204,20 @@ async fn peer_conn_handshake_matches_plaintext_secret_identity() {
 }
 
 #[tokio::test]
+async fn local_packet_channel_injection_has_no_attached_privilege() {
+    let (sender, mut receiver) = create_packet_recv_chan();
+    let mut packet = ZCPacket::new_with_payload(b"local");
+    packet.fill_peer_manager_hdr(77, 3, PacketType::Data as u8);
+
+    sender.send(packet).await.unwrap();
+
+    let envelope = recv_packet_envelope_from_chan(&mut receiver).await.unwrap();
+    let (_, ingress) = envelope.into_parts();
+    assert_eq!(ingress, PeerPacketIngress::Local);
+    assert!(!ingress.is_attached());
+}
+
+#[tokio::test]
 async fn peer_map_forwards_packet_over_memory_tunnel() {
     let peer_session_store = Arc::new(PeerSessionStore::new());
     let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
@@ -163,6 +256,69 @@ async fn peer_map_forwards_packet_over_memory_tunnel() {
         .unwrap()
         .unwrap();
     assert_eq!(received.payload(), b"hello");
+}
+
+#[tokio::test]
+async fn peer_channel_uses_admission_origin_instead_of_packet_header() {
+    let peer_session_store = Arc::new(PeerSessionStore::new());
+    let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
+    let client_ctx = Arc::new(NoopPeerContext::default());
+    let server_ctx = Arc::new(NoopPeerContext::default());
+
+    let mut client_conn = PeerConn::new(
+        1,
+        client_ctx.clone(),
+        client_tunnel,
+        peer_session_store.clone(),
+    );
+    let mut server_conn = PeerConn::new_with_peer_id_hint_and_origin(
+        2,
+        server_ctx.clone(),
+        server_tunnel,
+        None,
+        peer_session_store,
+        PeerConnectionOrigin::Attached,
+    );
+    let (client_ret, server_ret) = tokio::join!(
+        client_conn.do_handshake_as_client(),
+        server_conn.do_handshake_as_server()
+    );
+    client_ret.unwrap();
+    server_ret.unwrap();
+    let server_conn_id = server_conn.get_conn_id();
+
+    let (client_tx, _client_rx) = create_packet_recv_chan();
+    let (server_tx, mut server_rx) = create_packet_recv_chan();
+    let client_map = PeerMap::new(client_tx, client_ctx, 1);
+    let server_map = PeerMap::new(server_tx, server_ctx, 2);
+    client_map.add_new_peer_conn(client_conn).await.unwrap();
+    server_map.add_new_peer_conn(server_conn).await.unwrap();
+    assert!(server_map.has_direct_attached_peer(1));
+
+    let mut packet = ZCPacket::new_with_payload(b"forged source");
+    packet.fill_peer_manager_hdr(77, 3, PacketType::Data as u8);
+    client_map.send_msg_directly(packet, 2).await.unwrap();
+
+    let envelope = timeout(
+        Duration::from_secs(1),
+        recv_packet_envelope_from_chan(&mut server_rx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (received, ingress) = envelope.into_parts();
+    assert_eq!(
+        received.peer_manager_header().unwrap().from_peer_id.get(),
+        77
+    );
+    assert_eq!(
+        ingress,
+        PeerPacketIngress::Peer {
+            peer_id: 1,
+            conn_id: server_conn_id,
+            origin: PeerConnectionOrigin::Attached,
+        }
+    );
 }
 
 #[tokio::test]

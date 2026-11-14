@@ -740,8 +740,8 @@ where
                 error: failure.message.clone(),
             });
         }
-        self.direct_manager.run().await?;
         let ret = self.manager.run().await;
+        self.direct_manager.run().await?;
         ret
     }
 

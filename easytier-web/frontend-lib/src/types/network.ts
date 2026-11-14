@@ -5,7 +5,15 @@ import {
   type NetworkPeerConfig,
   type NetworkConfig as ProtoNetworkConfig,
   type PortForwardConfig,
+  type VpnPortalClientConfig,
+  type VpnPortalConfig,
 } from '../generated/proto/api_manage'
+import {
+  VpnPortalClientState,
+  VpnPortalInfo as VpnPortalInfoPb,
+  type VpnPortalClientInfo,
+  type VpnPortalInfo,
+} from '../generated/proto/api_instance'
 import {
   Action as AclAction,
   ChainType as AclChainType,
@@ -26,16 +34,24 @@ import {
 import { prepareNetworkConfigForProtoJson } from './networkCompat'
 
 export { AclAction, AclChainType, AclProtocol, CompressionAlgoPb, NatType, NetworkingMethod }
-export type { Acl, AclChain, AclRule, AclV1, GroupIdentity, GroupInfo, NetworkPeerConfig, PeerFeatureFlag, PortForwardConfig, SecureModeConfig }
+export { VpnPortalClientState }
+export type { Acl, AclChain, AclRule, AclV1, GroupIdentity, GroupInfo, NetworkPeerConfig, PeerFeatureFlag, PortForwardConfig, SecureModeConfig, VpnPortalClientConfig, VpnPortalClientInfo, VpnPortalConfig, VpnPortalInfo }
 
 export type NetworkConfig = Omit<
   ProtoNetworkConfig,
-  'instance_id' | 'instance_recv_bps_limit' | 'mtu' | 'networking_method'
+  | 'instance_id'
+  | 'instance_recv_bps_limit'
+  | 'mtu'
+  | 'networking_method'
 > & {
   instance_id: string
   mtu: number | null
   instance_recv_bps_limit: number | string | null
   networking_method: NetworkingMethod | string
+  /// Form-only field: an admin-issued credential secret for joining as a
+  /// temporary device. Saved as secure_mode.local_private_key with an empty
+  /// network_secret - the CLI `--credential` equivalent.
+  credential_secret?: string
 }
 
 export type NormalizedAclV1 = AclV1 & {
@@ -89,11 +105,6 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     peer_urls: [],
 
     proxy_cidrs: [],
-
-    enable_vpn_portal: false,
-    vpn_portal_listen_port: 22022,
-    vpn_portal_client_network_addr: '',
-    vpn_portal_client_network_len: 24,
 
     advanced_settings: false,
 
@@ -310,7 +321,22 @@ export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
   normalized.mapped_listeners ??= []
   normalized.upnp_listeners ??= []
   normalized.port_forwards ??= []
+  if (normalized.vpn_portal_config) {
+    normalized.vpn_portal_config.clients ??= []
+    normalized.vpn_portal_config.clients.forEach((client) => {
+      client.groups ??= []
+    })
+  }
   normalized.acl = config.acl === undefined ? undefined : normalizeAcl(normalized.acl)
+
+  // A credential-mode instance (no network secret, private key from the
+  // admin-issued credential) surfaces its key in the form's credential
+  // field instead of a raw secure_mode key.
+  normalized.credential_secret = config.credential_secret
+  if (!normalized.network_secret && normalized.secure_mode?.local_private_key) {
+    normalized.credential_secret ??= normalized.secure_mode.local_private_key
+    normalized.secure_mode = { enabled: true }
+  }
 
   return normalized
 }
@@ -327,9 +353,22 @@ export function toBackendNetworkConfig(config: NetworkConfig): NetworkConfig {
     backend.acl = undefined
   }
 
+  // The form credential field compiles into the credential-identity shape:
+  // empty network secret plus secure mode keyed by the credential (the CLI
+  // `--credential` equivalent); the node derives the matching public key.
+  const credentialSecret = (config.credential_secret ?? '').trim()
+  if (credentialSecret) {
+    backend.network_secret = undefined
+    backend.secure_mode = { enabled: true, local_private_key: credentialSecret }
+  }
+
   return NetworkConfigPb.toJson(backend, {
     useProtoFieldName: true,
   }) as unknown as NetworkConfig
+}
+
+export function normalizeVpnPortalInfo(info: unknown): VpnPortalInfo {
+  return VpnPortalInfoPb.fromJson(info as any, { ignoreUnknownFields: true })
 }
 
 export interface NetworkInstance {
@@ -396,7 +435,6 @@ export interface NodeInfo {
   }
   stun_info: StunInfo
   listeners: Url[]
-  vpn_portal_cfg?: string
   peer_id: number
 }
 

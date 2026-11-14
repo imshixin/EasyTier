@@ -3,8 +3,10 @@
 #[macro_use]
 extern crate rust_i18n;
 
+use std::net::IpAddr;
 use std::sync::Arc;
-use std::{net::IpAddr, time::Duration};
+
+use central_network::gateway;
 
 use clap::Parser;
 use easytier::tunnel::websocket::WsTunnelListener;
@@ -24,6 +26,7 @@ use easytier_core::{socket::SocketListener, tunnel::Tunnel};
 use easytier::tunnel::IpScheme;
 use mimalloc::MiMalloc;
 
+mod central_network;
 mod client_manager;
 mod db;
 mod migrator;
@@ -116,10 +119,24 @@ struct Cli {
     #[arg(
         long,
         env = "ET_HEARTBEAT_MIN_RESPONSE_MS",
-        default_value = "0",
+        default_value = "3500",
         help = t!("cli.heartbeat_min_response_ms").to_string(),
     )]
     heartbeat_min_response_ms: u64,
+
+    #[arg(
+        long,
+        env = "ET_HEARTBEAT_TIMEOUT_MS",
+        default_value = "15000",
+        help = t!("cli.heartbeat_timeout_ms").to_string(),
+    )]
+    heartbeat_timeout_ms: u64,
+
+    #[arg(long, env = "ET_GATEWAY_PEER_URL")]
+    gateway_peer_url: Option<url::Url>,
+
+    #[arg(long, env = "ET_GATEWAY_RELAY_DATA", default_value = "false")]
+    gateway_relay_data: bool,
 
     #[cfg(feature = "embed")]
     #[arg(
@@ -288,7 +305,21 @@ async fn main() {
     setup_panic_handler();
 
     let cli = Cli::parse();
-    log::init(&cli, false).unwrap();
+    log::init_with_default_console_targets(&cli, false, &["CORE", "easytier_web"]).unwrap();
+    tracing::info!(
+        version = EASYTIER_VERSION,
+        web_instance_id = ?cli.webhook.web_instance_id,
+        api_address = %cli.api_server_addr,
+        api_port = cli.api_server_port,
+        config_protocol = %cli.config_server_protocol,
+        config_port = cli.config_server_port,
+        heartbeat_min_response_ms = cli.heartbeat_min_response_ms,
+        heartbeat_timeout_ms = cli.heartbeat_timeout_ms,
+        webhook_enabled = cli.webhook.webhook_url.as_deref().is_some_and(|url| !url.trim().is_empty()),
+        rust_log_override = std::env::var_os("RUST_LOG").is_some(),
+        console_log_override = cli.console_log_level.is_some(),
+        "easytier-web starting"
+    );
 
     // Validate OIDC configuration: check split-deploy specific requirements
     // Basic OIDC parameter validation is handled in OidcConfig::from_params
@@ -319,17 +350,52 @@ async fn main() {
     // let db = db::Db::new(":memory:").await.unwrap();
     let db = db::Db::new(cli.db).await.unwrap();
     let feature_flags = Arc::new(cli.feature_flags);
-    let webhook_config = Arc::new(webhook::WebhookConfig::new(
+    let mut webhook_config = webhook::WebhookConfig::new(
         cli.webhook.webhook_url,
         cli.webhook.webhook_secret,
         cli.webhook.internal_auth_token,
         cli.webhook.web_instance_id,
         cli.webhook.web_instance_api_base_url,
-    ));
+    );
+    let central_mode = !webhook_config.has_external_endpoint();
+    if central_mode {
+        webhook_config =
+            webhook_config.with_handler(Arc::new(central_network::device_auth::DeviceAuth::new(
+                db.clone(),
+                feature_flags.allow_auto_create_user,
+            )));
+    } else if cli.gateway_peer_url.is_some() {
+        eprintln!("Gateway requires central network mode; remove --webhook-url");
+        std::process::exit(2);
+    }
+    let webhook_config = Arc::new(webhook_config);
+    let heartbeat_policy = client_manager::HeartbeatPolicy::from_millis(
+        cli.heartbeat_min_response_ms,
+        cli.heartbeat_timeout_ms,
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("Invalid heartbeat configuration: {error}");
+        std::process::exit(2);
+    });
+
+    let network_instances = cli.gateway_peer_url.as_ref().map(|peer_url| {
+        let config = gateway::GatewayConfig {
+            peer_url: peer_url.to_string(),
+            relay_data: cli.gateway_relay_data,
+        };
+        config
+            .validate(&cli.config_server_protocol)
+            .unwrap_or_else(|error| {
+                eprintln!("Invalid Gateway configuration: {error}");
+                std::process::exit(2);
+            });
+        Arc::new(gateway::NetworkInstanceManager::new(config))
+    });
+
     let mut mgr = client_manager::ClientManager::new(
         db.clone(),
         cli.geoip_db,
-        Duration::from_millis(cli.heartbeat_min_response_ms),
+        heartbeat_policy,
         feature_flags.clone(),
         webhook_config.clone(),
     );
@@ -340,14 +406,30 @@ async fn main() {
     if v4_listener.is_none() && v6_listener.is_none() {
         panic!("Listen to both IPv4 and IPv6 failed");
     }
-    if let Some(listener) = v6_listener {
-        mgr.add_listener(listener).await.unwrap();
-    }
-    if let Some(listener) = v4_listener {
-        mgr.add_listener(listener).await.unwrap();
+    for listener in [v6_listener, v4_listener].into_iter().flatten() {
+        if let Some(instances) = network_instances.as_ref() {
+            mgr.add_listener(gateway::listener::GatewayListener::new(
+                listener,
+                instances.clone(),
+            ))
+            .await
+            .unwrap();
+        } else {
+            mgr.add_listener(listener).await.unwrap();
+        }
     }
 
     let mgr = Arc::new(mgr);
+    let central_service = Arc::new(
+        central_network::service::CentralNetworkService::with_gateway(
+            db.clone(),
+            mgr.clone(),
+            network_instances,
+        ),
+    );
+    if central_mode {
+        central_service.start_reconciler();
+    }
 
     #[cfg(feature = "embed")]
     let (web_router_restful, web_router_static) = if cli.no_web {
@@ -382,11 +464,14 @@ async fn main() {
     let _restful_server_tasks = restful::RestfulServer::new(
         std::net::SocketAddr::new(cli.api_server_addr, cli.api_server_port),
         mgr.clone(),
+        central_service,
         db,
         web_router_restful,
         feature_flags,
         oidc_config,
         webhook_config,
+        cli.config_server_protocol.clone(),
+        cli.config_server_port,
     )
     .await
     .unwrap()

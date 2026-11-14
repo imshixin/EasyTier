@@ -9,15 +9,24 @@ use easytier_core::connectivity::{hole_punch::port_mapping::UdpPortMappingLifecy
     PortMappingBackend as CorePortMappingBackend, PortMappingLifecycle,
     PortMappingProtocol as CorePortMappingProtocol
 }};
-use igd_next::{
-    AddAnyPortError, PortMappingProtocol as IgdPortMappingProtocol, SearchOptions,
-    aio::{
-        Gateway,
-        tokio::{Tokio, search_gateway},
-    },
-};
+// use igd_next::{
+//     AddAnyPortError, PortMappingProtocol as IgdPortMappingProtocol, SearchOptions,
+
+// };
 use natpmp::{
-    Protocol as NatPmpMappingProtocol, Response as NatPmpResponse, new_tokio_natpmp, new_tokio_natpmp_with,
+    Protocol as NatPmpMappingProtocol, Response as NatPmpResponse, new_tokio_natpmp_with,
+    get_default_gateway,
+    new_natpmp_async_with,
+};
+// use natpmp::{
+use tokio::net::UdpSocket;
+
+use crate::igd_next::{
+    AddAnyPortError, Gateway, PortMappingProtocol as IgdPortMappingProtocol, SearchOptions, search_gateway,
+    // aio::{
+    //     Gateway,
+    //     tokio::{Tokio, search_gateway},
+    // },
 };
 
 use super::netns::NetNS;
@@ -28,11 +37,29 @@ const NAT_PMP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
 const UPNP_LEASE_DURATION_SECS: u32 = 300;
 const UPNP_DESCRIPTION: &str = "EasyTier udp hole punch";
 
-type TokioGateway = Gateway<Tokio>;
+async fn new_protected_natpmp(
+    gateway: Option<Ipv4Addr>,
+) -> anyhow::Result<natpmp::NatpmpAsync<UdpSocket>> {
+    let gateway = gateway
+        .map(Ok)
+        .unwrap_or_else(|| get_default_gateway().map_err(anyhow::Error::from))?;
+    let gateway_addr = SocketAddr::V4(SocketAddrV4::new(gateway, natpmp::NATPMP_PORT));
+    let socket = crate::socket::udp::create_udp_socket(
+        &easytier_core::socket::udp::UdpBindOptions::direct_connect()
+            .with_local_addr(Some("0.0.0.0:0".parse().unwrap())),
+    )
+    .await
+    .context("create protected nat-pmp socket")?;
+    socket
+        .connect(gateway_addr)
+        .await
+        .with_context(|| format!("connect nat-pmp socket to gateway {gateway}"))?;
+    Ok(new_natpmp_async_with(socket, gateway))
+}
 
 enum PortMappingBackend {
     NatPmp { gateway: Ipv4Addr, protocol: NatPmpMappingProtocol },
-    Igd { gateway: TokioGateway, protocol: IgdPortMappingProtocol },
+    Igd { gateway: Gateway, protocol: IgdPortMappingProtocol },
 }
 
 struct ActivePortMapping {
@@ -64,8 +91,8 @@ impl ActivePortMapping {
     fn core_protocol(&self) -> CorePortMappingProtocol {
         match self.backend {
             PortMappingBackend::Igd { gateway: _, protocol } => match protocol {
-                IgdPortMappingProtocol::TCP => CorePortMappingProtocol::Tcp,
-                IgdPortMappingProtocol::UDP => CorePortMappingProtocol::Udp,
+                IgdPortMappingProtocol::Tcp => CorePortMappingProtocol::Tcp,
+                IgdPortMappingProtocol::Udp => CorePortMappingProtocol::Udp,
             },
             PortMappingBackend::NatPmp { gateway: _, protocol } => match protocol {
                 NatPmpMappingProtocol::TCP => CorePortMappingProtocol::Tcp,
@@ -77,7 +104,9 @@ impl ActivePortMapping {
     async fn discover_nat_pmp_gateway(
         local_listener: &url::Url,
     ) -> anyhow::Result<(Ipv4Addr, SocketAddr)> {
-        let client = new_tokio_natpmp().await.context("create nat-pmp client")?;
+        let client = new_protected_natpmp(None)
+            .await
+            .context("create nat-pmp client")?;
         let gateway = *client.gateway();
         let gateway_addr = SocketAddr::V4(SocketAddrV4::new(gateway, natpmp::NATPMP_PORT));
         let local_addr = resolve_internal_addr(gateway_addr, local_listener).await?;
@@ -108,7 +137,7 @@ impl ActivePortMapping {
     async fn discover_igd_gateway(
         net_ns: &NetNS,
         local_listener: &url::Url,
-    ) -> anyhow::Result<(TokioGateway, SocketAddr)> {
+    ) -> anyhow::Result<(Gateway, SocketAddr)> {
         let _g = net_ns.guard();
         let gateway = search_gateway(SearchOptions {
             timeout: Some(UPNP_SEARCH_TIMEOUT),
@@ -124,7 +153,7 @@ impl ActivePortMapping {
 
     async fn establish_via_igd(
         local_listener: &url::Url,
-        gateway: TokioGateway,
+        gateway: Gateway,
         protocol: IgdPortMappingProtocol,
         local_addr: SocketAddr,
     ) -> anyhow::Result<Self> {
@@ -386,7 +415,7 @@ pub(crate) fn spawn_udp_port_mapping_lifecycle(
 async fn discover_igd_gateway_in_netns(
     net_ns: NetNS,
     local_listener: url::Url,
-) -> anyhow::Result<(TokioGateway, SocketAddr)> {
+) -> anyhow::Result<(Gateway, SocketAddr)> {
     if !should_run_port_mapping_in_dedicated_thread(&net_ns) {
         return ActivePortMapping::discover_igd_gateway(&net_ns, &local_listener).await;
     }
@@ -409,7 +438,7 @@ async fn discover_igd_gateway_in_netns(
 async fn establish_igd_mapping_in_netns(
     net_ns: NetNS,
     local_listener: url::Url,
-    gateway: TokioGateway,
+    gateway: Gateway,
     protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
 ) -> anyhow::Result<ActivePortMapping> {
@@ -490,7 +519,7 @@ fn should_run_port_mapping_in_dedicated_thread(net_ns: &NetNS) -> bool {
 }
 
 async fn add_mapping_port_igd(
-    gateway: &TokioGateway,
+    gateway: &Gateway,
     protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
     local_listener: &url::Url,
@@ -575,7 +604,7 @@ async fn request_nat_pmp_mapping(
     public_port: u16,
     lifetime_secs: u32,
 ) -> anyhow::Result<u16> {
-    let client = new_tokio_natpmp_with(gateway)
+    let client = new_protected_natpmp(Some(gateway))
         .await
         .with_context(|| format!("create nat-pmp client for gateway {gateway}"))?;
     client
@@ -661,9 +690,13 @@ async fn resolve_internal_addr(
         listener_ipv4_host(local_listener).ok_or_else(|| anyhow!("listener must be ipv4"))?;
 
     let ip = if host.is_unspecified() {
-        let udp = std::net::UdpSocket::bind("0.0.0.0:0")
-            .context("bind probe socket for gateway route")?;
+        let options = easytier_core::socket::udp::UdpBindOptions::default()
+            .with_local_addr(Some("0.0.0.0:0".parse().unwrap()));
+        let udp = crate::socket::udp::create_udp_socket(&options)
+            .await
+            .context("create protected probe socket for gateway route")?;
         udp.connect(gateway_addr)
+            .await
             .with_context(|| format!("connect probe socket to gateway {gateway_addr}"))?;
         let SocketAddr::V4(local_addr) = udp.local_addr().context("get probe socket local addr")?
         else {
@@ -677,7 +710,7 @@ async fn resolve_internal_addr(
 }
 
 async fn renew_mapping_igd(
-    gateway: &TokioGateway,
+    gateway: &Gateway,
     protocol: IgdPortMappingProtocol,
     local_addr: SocketAddr,
     external_port: u16,
@@ -696,7 +729,7 @@ async fn renew_mapping_igd(
 }
 
 async fn remove_mapping_igd(
-    gateway: &TokioGateway,
+    gateway: &Gateway,
     protocol: IgdPortMappingProtocol,
     external_port: u16,
     local_listener: &url::Url,
@@ -709,8 +742,8 @@ async fn remove_mapping_igd(
 
 fn igd_protocol(protocol: &CorePortMappingProtocol) -> IgdPortMappingProtocol{
     match protocol {
-        CorePortMappingProtocol::Tcp => IgdPortMappingProtocol::TCP,
-        CorePortMappingProtocol::Udp => IgdPortMappingProtocol::UDP,
+        CorePortMappingProtocol::Tcp => IgdPortMappingProtocol::Tcp,
+        CorePortMappingProtocol::Udp => IgdPortMappingProtocol::Udp,
     }
 }
 

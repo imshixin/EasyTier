@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import { useTimeAgo } from '@vueuse/core'
-import { NetworkInstance, type TunnelInfo, type NodeInfo, type PeerRoutePair } from '../types/network'
+import { NetworkInstance, type NetworkConfig, type TunnelInfo, type NodeInfo, type PeerRoutePair } from '../types/network'
+import type { RemoteClient } from '../modules/api'
 import { useI18n } from 'vue-i18n';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ipv4InetToString, ipv4ToString, ipv6ToString } from '../modules/utils';
 import { latencyMs, lossRate, numericValue, peerConns } from '../modules/statusDisplay';
-import { Badge, DataTable, Column, Tag, Chip, Button, Dialog, ScrollPanel, Timeline, Divider, Card, } from 'primevue';
+import { Badge, DataTable, Column, Tag, Chip, Button, Dialog, Timeline, Divider, Card, } from 'primevue';
 import NetworkChart from './NetworkChart.vue';
+import VpnPortalDialog from './VpnPortalDialog.vue';
 
 const props = defineProps<{
   curNetworkInst: NetworkInstance | null,
+  api: RemoteClient,
+  readonly?: boolean,
 }>()
 
 const { t } = useI18n()
@@ -327,17 +331,34 @@ onUnmounted(() => {
 const dialogVisible = ref(false)
 const dialogContent = ref<any>('')
 const dialogHeader = ref('event_log')
+const vpnPortalVisible = ref(false)
+const networkConfig = ref<NetworkConfig>()
+const vpnPortalEnabled = computed(() => props.curNetworkInst?.running
+  && networkConfig.value?.vpn_portal_config !== undefined
+  && networkConfig.value.vpn_portal_config.enabled !== false)
 
-function showVpnPortalConfig() {
-  const my_node_info = myNodeInfo.value
-  if (!my_node_info)
-    return
-
-  const url = 'https://www.wireguardconfig.com/qrcode'
-  dialogContent.value = `${my_node_info.vpn_portal_cfg}\n\n # can generate QR code: ${url}`
-  dialogHeader.value = 'vpn_portal_config'
-  dialogVisible.value = true
-}
+watch(() => props.curNetworkInst?.instance_id, async (instanceId, _, onCleanup) => {
+  let active = true
+  vpnPortalVisible.value = false
+  networkConfig.value = undefined
+  if (!instanceId) return
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined
+  onCleanup(() => {
+    active = false
+    clearTimeout(refreshTimer)
+  })
+  const refresh = async () => {
+    try {
+      const config = await props.api.get_network_config(instanceId)
+      if (active) networkConfig.value = config
+    } catch (error) {
+      console.error('Failed to load WireGuard settings', error)
+    } finally {
+      if (active) refreshTimer = setTimeout(refresh, 10_000)
+    }
+  }
+  await refresh()
+}, { immediate: true })
 
 function showEventLogs() {
   const detail = props.curNetworkInst?.detail
@@ -354,10 +375,7 @@ function showEventLogs() {
   <div class="frontend-lib">
     <Dialog v-model:visible="dialogVisible" modal :header="t(dialogHeader)" class="w-full h-auto max-h-full"
       :baseZIndex="2000">
-      <ScrollPanel v-if="dialogHeader === 'vpn_portal_config'">
-        <pre>{{ dialogContent }}</pre>
-      </ScrollPanel>
-      <Timeline v-else :value="dialogContent">
+      <Timeline :value="dialogContent">
         <template #opposite="slotProps">
           <small class="text-surface-500 dark:text-surface-400">{{ useTimeAgo(Date.parse(slotProps.item.time))
           }}</small>
@@ -367,6 +385,9 @@ function showEventLogs() {
         </template>
       </Timeline>
     </Dialog>
+
+    <VpnPortalDialog v-if="vpnPortalVisible && curNetworkInst && vpnPortalEnabled" :key="curNetworkInst.instance_id"
+      :instance="curNetworkInst" :api="api" :readonly="readonly" @close="vpnPortalVisible = false" />
 
     <Card v-if="curNetworkInst?.error_msg">
       <template #title>
@@ -410,7 +431,7 @@ function showEventLogs() {
             </div>
 
             <div v-if="myNodeInfo" class="m-0 flex flex-row justify-center gap-x-5 text-sm">
-              <Button severity="info" :label="t('show_vpn_portal_config')" @click="showVpnPortalConfig" />
+              <Button v-if="vpnPortalEnabled" severity="info" :label="t('vpn_portal_devices')" @click="vpnPortalVisible = true" />
               <Button severity="info" :label="t('show_event_log')" @click="showEventLogs" />
             </div>
           </div>

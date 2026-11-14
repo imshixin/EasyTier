@@ -20,12 +20,19 @@ const url = defineModel<string>({ required: true })
 const editing = ref(false)
 const hostFocused = ref(false)
 
-const parseUrl = (val: string | null | undefined): { proto: string; host: string; port: number | null } => {
+type ParsedUrlValue = {
+    proto: string
+    host: string
+    port: number | null
+    path: string
+}
+
+const parseUrl = (val: string | null | undefined): ParsedUrlValue => {
     const getValidPort = (portStr: string, proto: string) => {
         const p = parseInt(portStr)
         return isNaN(p) ? (props.protos[proto] ?? 11010) : p
     }
-    const parseByPattern = (input: string) => {
+    const parseByPattern = (input: string): ParsedUrlValue | null => {
         const trimmed = input.trim()
         if (!trimmed) {
             return null
@@ -33,7 +40,9 @@ const parseUrl = (val: string | null | undefined): { proto: string; host: string
         const match = trimmed.match(/^(\w+):\/\/(.*)$/)
         const proto = match ? match[1] : 'tcp'
         const rest = match ? match[2] : trimmed
-        const authority = rest.split(/[/?#]/)[0]
+        const pathStart = rest.search(/[/?#]/)
+        const authority = pathStart >= 0 ? rest.slice(0, pathStart) : rest
+        const path = pathStart >= 0 ? rest.slice(pathStart) : ''
         if (!authority) {
             return null
         }
@@ -45,7 +54,7 @@ const parseUrl = (val: string | null | undefined): { proto: string; host: string
                 const remain = hostAndMaybePort.slice(ipv6End + 1)
                 // null = no explicit port in URL; do not fabricate a default
                 const port: number | null = remain.startsWith(':') ? getValidPort(remain.slice(1), proto) : null
-                return { proto, host, port }
+                return { proto, host, port, path }
             }
         }
         const portMatch = hostAndMaybePort.match(/^(.*):(\d+)$/)
@@ -53,26 +62,27 @@ const parseUrl = (val: string | null | undefined): { proto: string; host: string
         // null = no explicit port in URL; buildUrlValue will omit the port entirely,
         // preserving the protocol's implied standard port (e.g. 443 for wss://).
         const port: number | null = portMatch ? parseInt(portMatch[2]) : null
-        return { proto, host, port }
+        return { proto, host, port, path }
     }
 
     if (!val) {
-        return { proto: 'tcp', host: '', port: props.protos['tcp'] ?? 11010 }
+        return { proto: 'tcp', host: '', port: props.protos['tcp'] ?? 11010, path: '' }
     }
     const parsedByPattern = parseByPattern(val)
     if (parsedByPattern) {
         return parsedByPattern
     }
-    return { proto: 'tcp', host: '', port: null }
+    return { proto: 'tcp', host: '', port: null, path: '' }
 }
 
 const internalValue = ref(parseUrl(url.value))
 const defaultHost = '0.0.0.0'
 
-const buildUrlValue = (value: { proto: string, host: string, port: number | null }, forceDefaultHost = false) => {
+const buildUrlValue = (value: ParsedUrlValue, forceDefaultHost = false) => {
     const proto = value.proto || 'tcp'
     const rawHost = (value.host ?? '').trim()
     const host = rawHost || (forceDefaultHost ? defaultHost : '')
+    const path = supportsPath.value ? normalizePath(value.path) : ''
     if (!host) {
         return null
     }
@@ -80,9 +90,9 @@ const buildUrlValue = (value: { proto: string, host: string, port: number | null
     // original URL had no explicit port (port === null) – avoids overwriting an
     // implicit standard port (e.g. 443 for wss) with an EasyTier default (11012).
     if (props.protos[proto] === 0 || value.port === null) {
-        return `${proto}://${host}`
+        return `${proto}://${host}${path}`
     }
-    return `${proto}://${host}:${value.port}`
+    return `${proto}://${host}:${value.port}${path}`
 }
 
 const syncUrlFromInternal = (forceDefaultHost = false) => {
@@ -111,6 +121,18 @@ const isNoPortProto = computed(() => {
     return props.protos[internalValue.value.proto] === 0
 })
 
+const supportsPath = computed(() => {
+    const proto = internalValue.value.proto
+    return proto === 'ws' || proto === 'wss' || proto === 'http' || proto === 'https'
+})
+
+const normalizePath = (path: string) => {
+    const trimmed = path.trim()
+    if (!trimmed)
+        return ''
+    return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+}
+
 // Sync from external
 watch(() => url.value, (newVal) => {
     if (hostFocused.value) {
@@ -121,7 +143,8 @@ watch(() => url.value, (newVal) => {
     const sameHost = parsed.host === internalHost || (!internalHost.trim() && parsed.host === defaultHost)
     if (parsed.proto !== internalValue.value.proto ||
         !sameHost ||
-        parsed.port !== internalValue.value.port) {
+        parsed.port !== internalValue.value.port ||
+        parsed.path !== internalValue.value.path) {
         internalValue.value = parsed
     }
 })
@@ -171,6 +194,9 @@ const onProtoChange = (newProto: string) => {
                 <InputNumber v-model="internalValue.port" :format="false" :min="portMin" :max="portMax" class="max-w-24"
                     :placeholder="String(protos[internalValue.proto] ?? 11010)" fluid />
             </template>
+            <template v-if="supportsPath">
+                <InputText v-model="internalValue.path" placeholder="/mypath" class="grow" />
+            </template>
             <!-- Rendered in both responsive branches; keep action slot content free of side effects and duplicate IDs. -->
             <slot name="actions"></slot>
         </InputGroup>
@@ -201,6 +227,10 @@ const onProtoChange = (newProto: string) => {
                     <label>{{ t('port') }}</label>
                     <InputNumber v-model="internalValue.port" :format="false" :min="portMin" :max="portMax" class="w-full"
                         :placeholder="String(protos[internalValue.proto] ?? 11010)" />
+                </div>
+                <div v-if="supportsPath" class="flex flex-col gap-2">
+                    <label>{{ t('path') }}</label>
+                    <InputText v-model="internalValue.path" placeholder="/mypath" class="w-full" />
                 </div>
             </div>
             <template #footer>

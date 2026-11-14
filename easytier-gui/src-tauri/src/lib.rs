@@ -6,17 +6,23 @@ mod elevate;
 use anyhow::Context;
 #[cfg(target_os = "android")]
 use easytier::instance::factory::subscribe_native_instance_event;
+use easytier::proto::api::config::{
+    ConfigPatchAction, ConfigRpc, ConfigRpcClientFactory, VpnPortalClientPatch,
+};
+use easytier::proto::api::instance::{
+    GetVpnPortalInfoRequest, InstanceIdentifier, VpnPortalInfo, VpnPortalRpc,
+    VpnPortalRpcClientFactory, instance_identifier,
+};
 use easytier::proto::api::manage::{
-    CollectNetworkInfoResponse, ValidateConfigResponse, WebClientService,
+    CollectNetworkInfoResponse, ValidateConfigResponse, VpnPortalClientConfig, WebClientService,
     WebClientServiceClientFactory,
 };
+use easytier::proto::rpc_types::controller::BaseController;
 use easytier::web_client::{self, WebClient};
 use easytier::{
     common::config::{NetworkConfig, NetworkConfigExt},
     common::{
-        config::{
-            ConfigLoader, ConfigSource, FileLoggerConfig, LoggingConfigBuilder, TomlConfigLoader,
-        },
+        config::{ConfigLoader, ConfigSource, FileLoggerConfig, LoggingConfig, TomlConfigLoader},
         log,
     },
     instance::factory::{NativeInstanceManager, native_instance_manager},
@@ -124,6 +130,7 @@ async fn run_network_instance(
 ) -> Result<(), String> {
     let client_manager = get_client_manager!()?;
     let toml_config = cfg.gen_config().map_err(|e| e.to_string())?;
+    let _mutation = client_manager.config_mutation.lock().await;
     client_manager
         .pre_run_network_instance_hook(&app, &toml_config, manager::PersistedConfigSource::User)
         .await?;
@@ -147,6 +154,73 @@ async fn collect_network_info(
         .map_err(|e: uuid::Error| e.to_string())?;
     get_client_manager!()?
         .handle_collect_network_info(app, Some(vec![instance_id]))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_vpn_portal_info(instance_id: String) -> Result<Option<VpnPortalInfo>, String> {
+    let instance_id = instance_id
+        .parse::<uuid::Uuid>()
+        .map_err(|e| e.to_string())?;
+    let client_manager = get_client_manager!()?;
+    let client = client_manager
+        .rpc_manager
+        .rpc_client()
+        .scoped_client::<VpnPortalRpcClientFactory<BaseController>>(1, 1, "".to_string());
+    let response = client
+        .get_vpn_portal_info(
+            BaseController::default(),
+            GetVpnPortalInfoRequest {
+                instance: Some(InstanceIdentifier {
+                    selector: Some(instance_identifier::Selector::Id(instance_id.into())),
+                }),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(response.vpn_portal_info)
+}
+
+#[tauri::command]
+async fn patch_vpn_portal_clients(
+    app: AppHandle,
+    instance_id: String,
+    action: String,
+    name: Option<String>,
+    virtual_ip: Option<String>,
+    groups: Option<Vec<String>>,
+) -> Result<(), String> {
+    let instance_id = instance_id
+        .parse::<uuid::Uuid>()
+        .map_err(|e| e.to_string())?;
+    let action = match action.as_str() {
+        "add" => ConfigPatchAction::Add,
+        "remove" => ConfigPatchAction::Remove,
+        "clear" => ConfigPatchAction::Clear,
+        other => return Err(format!("invalid vpn portal client patch action: {other}")),
+    };
+    let client = if action == ConfigPatchAction::Clear {
+        None
+    } else {
+        Some(VpnPortalClientConfig {
+            name: name.unwrap_or_default(),
+            virtual_ip: virtual_ip.unwrap_or_default(),
+            groups: groups.unwrap_or_default(),
+        })
+    };
+
+    let client_manager = get_client_manager!()?;
+    let _mutation = client_manager.config_mutation.lock().await;
+    client_manager
+        .handle_patch_vpn_portal_clients(
+            app,
+            instance_id,
+            vec![VpnPortalClientPatch {
+                action: action as i32,
+                client,
+            }],
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -192,6 +266,7 @@ async fn remove_network_instance(app: AppHandle, instance_id: String) -> Result<
         .parse()
         .map_err(|e: uuid::Error| e.to_string())?;
     let client_manager = get_client_manager!()?;
+    let _mutation = client_manager.config_mutation.lock().await;
     client_manager
         .handle_remove_network_instances(app.clone(), vec![instance_id])
         .await
@@ -213,6 +288,7 @@ async fn update_network_config_state(
         .parse()
         .map_err(|e: uuid::Error| e.to_string())?;
     let client_manager = get_client_manager!()?;
+    let _mutation = client_manager.config_mutation.lock().await;
     if !disabled {
         let (cfg, source) = client_manager
             .handle_get_network_config_with_source(app.clone(), instance_id)
@@ -251,7 +327,9 @@ async fn save_network_config(app: AppHandle, cfg: NetworkConfig) -> Result<(), S
         .instance_id()
         .parse()
         .map_err(|e: uuid::Error| e.to_string())?;
-    get_client_manager!()?
+    let client_manager = get_client_manager!()?;
+    let _mutation = client_manager.config_mutation.lock().await;
+    client_manager
         .handle_save_network_config(app, instance_id, cfg)
         .await
         .map_err(|e| e.to_string())
@@ -286,7 +364,9 @@ async fn load_configs(
     configs: Vec<manager::StoredGuiConfig>,
     enabled_networks: Vec<String>,
 ) -> Result<(), String> {
-    get_client_manager!()?
+    let client_manager = get_client_manager!()?;
+    let _mutation = client_manager.config_mutation.lock().await;
+    client_manager
         .load_configs(app, configs, enabled_networks)
         .await
         .map_err(|e| e.to_string())?;
@@ -894,6 +974,7 @@ mod manager {
     pub(super) struct GUIClientManager {
         pub(super) storage: GUIStorage,
         pub(super) rpc_manager: BidirectRpcManager,
+        pub(super) config_mutation: Mutex<()>,
     }
     impl GUIClientManager {
         pub async fn new(
@@ -914,6 +995,7 @@ mod manager {
             Ok(Self {
                 storage: GUIStorage::new(),
                 rpc_manager,
+                config_mutation: Mutex::new(()),
             })
         }
 
@@ -1157,6 +1239,17 @@ mod manager {
         }
     }
     impl RemoteClientManager<AppHandle, GUIConfig, anyhow::Error> for GUIClientManager {
+        fn get_config_rpc_client(
+            &self,
+            _: AppHandle,
+        ) -> Option<Box<dyn ConfigRpc<Controller = BaseController> + Send>> {
+            Some(
+                self.rpc_manager
+                    .rpc_client()
+                    .scoped_client::<ConfigRpcClientFactory<BaseController>>(1, 1, String::new()),
+            )
+        }
+
         fn get_rpc_client(
             &self,
             _: AppHandle,
@@ -1271,12 +1364,24 @@ mod service {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn service_environment() -> Option<Vec<(String, String)>> {
+        // System LaunchDaemons run as root but launchd does not provide HOME.
+        Some(vec![("HOME".to_string(), "/var/root".to_string())])
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn service_environment() -> Option<Vec<(String, String)>> {
+        None
+    }
+
     pub fn install(opts: ServiceOptions) -> anyhow::Result<()> {
         let service = easytier::service_manager::Service::new(env!("CARGO_PKG_NAME").to_string())?;
         let options = easytier::service_manager::ServiceInstallOptions {
             program: super::get_exe_path().into(),
             args: opts.to_args_vec(),
             work_directory: std::env::current_dir()?,
+            environment: service_environment(),
             disable_autostart: false,
             description: Some("EasyTier Gui Service".to_string()),
             display_name: Some("EasyTier Gui Service".to_string()),
@@ -1311,6 +1416,21 @@ mod service {
     pub fn status() -> anyhow::Result<easytier::service_manager::ServiceStatus> {
         let service = easytier::service_manager::Service::new(env!("CARGO_PKG_NAME").to_string())?;
         service.status()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn service_environment_matches_platform() {
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                super::service_environment(),
+                Some(vec![("HOME".to_string(), "/var/root".to_string())])
+            );
+
+            #[cfg(not(target_os = "macos"))]
+            assert_eq!(super::service_environment(), None);
+        }
     }
 }
 
@@ -1351,7 +1471,7 @@ pub fn run_gui() -> std::process::ExitCode {
             let Ok(log_dir) = get_log_dir(app.app_handle()) else {
                 return Ok(());
             };
-            let config = LoggingConfigBuilder::default()
+            let config = LoggingConfig::builder()
                 .file_logger(FileLoggerConfig {
                     dir: Some(log_dir.to_string_lossy().to_string()),
                     level: None,
@@ -1359,8 +1479,7 @@ pub fn run_gui() -> std::process::ExitCode {
                     size_mb: None,
                     count: None,
                 })
-                .build()
-                .map_err(|e| e.to_string())?;
+                .build();
             let Ok(_) = log::init(&config, true) else {
                 return Ok(());
             };
@@ -1393,6 +1512,8 @@ pub fn run_gui() -> std::process::ExitCode {
             generate_network_config,
             run_network_instance,
             collect_network_info,
+            get_vpn_portal_info,
+            patch_vpn_portal_clients,
             set_logging_level,
             set_tun_fd,
             easytier_version,
